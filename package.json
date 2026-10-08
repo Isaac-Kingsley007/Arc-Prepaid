@@ -6,12 +6,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "check:receive:testnet": "tsx scripts/check-receive-with-authorization.ts testnet",
+    "check:receive:mainnet": "tsx scripts/check-receive-with-authorization.ts mainnet"
   },
   "dependencies": {
     "next": "16.3.8",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "viem": "^2.57.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -21,6 +24,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5"
   },
   "packageManager": "pnpm@12.9.1"
