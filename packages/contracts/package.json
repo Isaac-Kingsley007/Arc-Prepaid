@@ -1,0 +1,25 @@
+{
+  "name": "@prepaid/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "build": "hardhat build",
+    "test": "hardhat test nodejs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.4.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-network-helpers": "^3.0.0",
+    "@nomicfoundation/hardhat-node-test-runner": "^3.0.0",
+    "@nomicfoundation/hardhat-viem": "^3.0.0",
+    "@types/node": "^22",
+    "hardhat": "^3.0.0",
+    "solc": "0.8.30",
+    "typescript": "^5",
+    "viem": "^2.57.3"
+  }
+}
