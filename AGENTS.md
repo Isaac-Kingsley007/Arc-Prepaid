@@ -43,5 +43,7 @@ It is built on **EIP-3009** (off-chain signed USDC transfers): `transferWithAuth
 - **Frontend:** Next.js (App Router) + TypeScript + **viem** (wagmi allowed for wallet connection).
 - **Relayer:** a plain Node/TypeScript script using viem (no framework).
 - **No database.** The contract is the source of truth. Do not add Supabase, Postgres, Redis, etc.
-- Package manager: **pnpm** (workspaces). If the human prefers npm, change this line and adapt commands.
+- Package manager: **pnpm** 
+
+
 
