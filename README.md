@@ -2,6 +2,98 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+### Deploy PrePaid to Arc testnet
+
+The deployment uses the existing Hardhat build and one viem script,
+`scripts/deploy-testnet.mts`. **Only PrePaid is deployed.** The script points
+it to real Arc USDC at `0x3600000000000000000000000000000000000000`;
+`MockUSDC` remains exclusively for local tests. No new dependencies are needed.
+
+Run the following from the repository root using Node.js **22.13+**:
+
+1. Install dependencies and run the tests:
+
+   ```powershell
+   pnpm install
+   pnpm contracts:test
+   ```
+
+2. If `.env.testnet` does not already exist, copy the template:
+
+   ```powershell
+   Copy-Item .env.testnet.example .env.testnet
+   ```
+
+   Open `.env.testnet` in your editor. Replace the private-key placeholder
+   with the **0x-prefixed private key of your funded testnet wallet**.
+   This wallet becomes PrePaid's initial owner and controls tip withdrawal.
+   The default RPC is `https://rpc.testnet.arc.io`; an alternate Arc testnet
+   RPC can be used if needed. The file is Git-ignored. Never paste the key
+   into chat, a terminal command, or a `NEXT_PUBLIC_` variable.
+
+3. Run the read-only deployment preflight:
+
+   ```powershell
+   pnpm contracts:check:testnet
+   ```
+
+   Check that the printed deployer address is your funded wallet. The script
+   checks chain ID **5042002**, the real USDC interface, native USDC balance,
+   and gas estimation using the actual PrePaid constructor. It prints a
+   maximum deployment gas cost. It does not sign or submit a transaction.
+   Your existing faucet USDC pays for deployment; no token approval or deposit
+   into PrePaid is required.
+
+4. Broadcast the deployment:
+
+   ```powershell
+   pnpm contracts:deploy:testnet
+   ```
+
+   The command rebuilds the contract, repeats the checks, and sends one
+   deployment transaction. It uses a 20% gas-limit margin, a fee cap of twice
+   the current gas price (at least 20 Gwei), and zero priority fee. Gas fees
+   are native USDC in 18-decimal units. After one confirmation, the script
+   checks deployed code, `owner()`, and `usdc()` against the expected values.
+
+   The transaction URL and deployed address are printed. Public deployment
+   details are saved in `deployments/arc-testnet.json`, including the owner,
+   transaction hash, compiler version, constructor arguments, and gas cost.
+   Keep this file: it is the deployment record for subsequent integration.
+
+5. Publish the source on [Arc Testnet Explorer's verification page](https://explorer.testnet.arc.io/contract-verification).
+   Select Solidity **Standard JSON Input**, use the deployed contract address,
+   and upload `deployments/arc-testnet-input.json`. This generated, Git-ignored
+   file contains the exact compiler input and imported sources used to build
+   PrePaid. Use compiler `v0.8.30+commit.73712a01` (also recorded in the
+   deployment JSON). The input already contains optimizer settings (200 runs)
+   and the Cancun EVM target. Select `PrePaid` as the contract; its fully
+   qualified source name is recorded in the `contract` field.
+   If the form asks for constructor arguments, use `constructorArguments`
+   from the deployment record; omit its `0x` prefix if the field requires raw hex.
+
+6. Open the address on the explorer. Confirm `owner()` is your deployer wallet
+   and `usdc()` is `0x3600000000000000000000000000000000000000`. Once verified,
+   the explorer's Contract tab exposes read/write functions. Save the address
+   for the wallet-signing UI and the cron relayer. A real signed payment,
+   cancellation, and tip withdrawal are the next integration checks before
+   mainnet deployment.
+
+If a command reports a network error, retry the **check** command or set another
+testnet RPC in `.env.testnet`. A mainnet RPC is rejected before broadcasting.
+If deployment printed a transaction hash but receipt waiting or read-back failed,
+inspect that hash on the explorer and consult `deployments/arc-testnet.json`.
+**Do not blindly run deploy again:** a transaction may already have succeeded.
+The script refuses to deploy when that record exists. Move it aside only after
+checking the transaction and intentionally deciding to deploy a new contract.
+Each intentional deployment creates a new address; old signatures do not move
+to the new contract.
+
+This workflow follows [Arc's deployment and verification guide](https://docs.arc.io/arc/tutorials/deploy-on-arc)
+and [Arc gas requirements](https://docs.arc.io/arc/references/gas-and-fees).
+The deployment script is tested end to end against a local EVM; the preflight
+command is the live check against your chosen Arc testnet RPC.
+
 ### PrePaid smart contract
 
 The Solidity contract lives at `packages/contracts/contracts/PrePaid.sol`.

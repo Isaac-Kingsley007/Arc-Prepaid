@@ -11,7 +11,9 @@
     "check:receive:mainnet": "tsx scripts/check-receive-with-authorization.ts mainnet",
     "contracts:build": "pnpm --filter @prepaid/contracts build",
     "contracts:test": "pnpm --filter @prepaid/contracts test",
-    "contracts:typecheck": "pnpm --filter @prepaid/contracts typecheck"
+    "contracts:typecheck": "pnpm --filter @prepaid/contracts typecheck",
+    "contracts:check:testnet": "pnpm contracts:build && tsx --env-file=.env.testnet scripts/deploy-testnet.mts --check",
+    "contracts:deploy:testnet": "pnpm contracts:build && tsx --env-file=.env.testnet scripts/deploy-testnet.mts --deploy"
   },
   "dependencies": {
     "next": "16.3.8",
