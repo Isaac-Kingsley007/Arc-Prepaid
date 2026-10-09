@@ -1,6 +1,25 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+PrePaid lets users plan recurring USDC payments on Arc. The frontend uses
+Next.js, and the smart contract uses signed USDC transfer authorizations.
 
 ## Getting Started
+
+### Preview the payment UI
+
+Run `pnpm dev` from the repository root and open `http://localhost:3000`.
+The form supports a recipient, payment amount, optional tip, first payment
+date/time, and daily, weekly, or monthly intervals. End a schedule after
+1–50 payments or on a chosen date. The live preview and review dialog show
+dates and exact USDC totals. All dates use your device's local timezone;
+monthly payments keep the original day and adjust for shorter months.
+
+This is a UI preview. The wallet button explains the upcoming integration;
+it does not connect a wallet. Reviewed plans can be saved as unsigned drafts
+for the current page session, reused, or discarded. Refreshing clears drafts.
+There are no signatures, RPC calls, or on-chain payments/cancellations yet.
+Authorization execution windows will be configured during wallet integration.
+
+Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
+`pnpm exec tsx --test app/schedule.test.ts`.
 
 ### Deploy PrePaid to Arc testnet
 
