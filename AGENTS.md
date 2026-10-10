@@ -42,7 +42,7 @@ It is built on **EIP-3009** (off-chain signed USDC transfers): `transferWithAuth
 - **Contracts:** Hardhat + TypeScript, Solidity (see §9 for version), OpenZeppelin.
 - **Frontend:** Next.js (App Router) + TypeScript + **viem** (wagmi allowed for wallet connection) + tailwindcss.
 - **Relayer:** a plain Node/TypeScript script using viem (no framework).
-- **No database.** The contract is the source of truth. Do not add Supabase, Postgres, Redis, etc.
+- **PostGress Database with simple drivers:** we use neon postgress 
 - Package manager: **pnpm** 
 
 

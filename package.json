@@ -7,6 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "db:migrate": "tsx --conditions=react-server --env-file=.env.local scripts/db-migrate.ts",
+    "db:check": "tsx --conditions=react-server --env-file=.env.local scripts/db-check.ts",
+    "db:test": "tsx --conditions=react-server --test lib/db/*.test.ts",
     "check:receive:testnet": "tsx scripts/check-receive-with-authorization.ts testnet",
     "check:receive:mainnet": "tsx scripts/check-receive-with-authorization.ts mainnet",
     "contracts:build": "pnpm --filter @prepaid/contracts build",
@@ -17,11 +20,15 @@
   },
   "dependencies": {
     "next": "16.3.8",
+    "postgres": "^3.4.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "server-only": "^0.0.1",
     "viem": "^2.57.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
