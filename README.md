@@ -115,136 +115,185 @@ command is the live check against your chosen Arc testnet RPC.
 
 ### PrePaid smart contract
 
-The Solidity contract lives at `packages/contracts/contracts/PrePaid.sol`.
-It has its own Hardhat 3 + TypeScript package, uses OpenZeppelin 5.4.0, and
-compiles with the pinned Solidity 0.8.30 npm compiler targeting Cancun
-(compatible with Arc's documented Osaka baseline). Use Node.js **22.13+**.
+The contract lives at `packages/contracts/contracts/PrePaid.sol`. It uses
+Hardhat 3, OpenZeppelin 5.4.0 and Solidity 0.8.30 (Cancun target).
+Run from the repository root with Node.js **22.13+**:
 
-Run these commands from the repository root:
-
-```bash
-pnpm install
+```powershell
 pnpm contracts:build
 pnpm contracts:test
 pnpm contracts:typecheck
 ```
 
-The constructor takes a USDC address. For both Arc testnet and mainnet, use
-`0x3600000000000000000000000000000000000000`. The deployer becomes the owner
-and can transfer ownership through OpenZeppelin's two-step flow. Constructor
-checks query `decimals()` and `DOMAIN_SEPARATOR()`; they do not depend on
-the token address having ordinary contract bytecode.
+The constructor takes the real USDC address. Arc documents
+`0x3600000000000000000000000000000000000000` on both networks.
+The deployer is the initial owner; ownership transfers require acceptance
+through OpenZeppelin's two-step flow. Token checks use `decimals()` and
+`DOMAIN_SEPARATOR()` without requiring ordinary token bytecode.
 
-| Function | Caller and purpose |
+#### Storage responsibilities
+
+| Location | Information |
 | --- | --- |
-| `createSchedule(PaymentInput[] inputs)` | Payer submits one setup transaction to store all payment details and signatures. Returns a schedule ID. |
-| `executePayment(paymentId)` | Anyone executes one payment whose window is open. Reverts if it cannot complete. |
-| `executePayments(paymentIds)` | Cron relayer or anyone submits up to 50 IDs. Checks their windows, skips non-ready payments, and isolates failed payments. |
-| `cancelSchedule(scheduleId)` | The schedule's payer cancels every remaining payment with one flag update. |
-| `withdrawTips(recipient)` | Current owner withdraws all accrued tips as ERC-20 USDC. |
-| `getPayment(paymentId)` / `schedules(scheduleId)` | Read stored signatures, forwarding instructions, and schedule ownership. |
-| `getPaymentState(paymentId)` | Read `Unknown=0`, `Pending=1`, `Ready=2`, `Executed=3`, `Cancelled=4`, or `Expired=5`. |
-| `getDuePaymentIds(cursor, scanLimit)` | Read up to 100 stored records and return ready IDs plus the next cursor. |
-| `getPayerScheduleIds(payer, offset, limit)` | Read a page of a payer's schedules; `payerScheduleCount(payer)` gives the total. |
+| PrePaid storage | `cancelledSchedules[payer][scheduleId]`, the platform's `accruedTips`, ownership and the immutable USDC address. |
+| USDC storage | Used or revoked authorization nonces, through `authorizationState(payer, nonce)`. |
+| Planned PostgreSQL database | Signatures, full payment instructions, derived nonces, recurrence rules, labels, discovery indexes, transaction hashes and retry bookkeeping. |
+| Transaction receipts | Successful payments, failed batch items, cancellations and withdrawals. |
 
-Each `PaymentInput` stores `payee`, `amount`, `tip`, `validAfter`,
-`validBefore`, `nonce`, `v`, `r`, and `s`. All amounts use **six decimals**:
-100 USDC is `100_000_000`; a 1 USDC tip is `1_000_000`.
-The signed USDC `value` must equal `amount + tip` (101 USDC in this example).
-Different payments in one schedule may have different payees, amounts, tips,
-and time windows. Schedules are immutable after creation and contain at most
-50 payments; their payment IDs are consecutive, starting at `firstPaymentId`.
+There is no on-chain schedule registration, payment array, signature storage,
+payment counter, or duplicate execution flag. The database is planned for the
+next phase; no database or cron integration is implemented in this change.
+Submitted payment details and signatures are public transaction calldata;
+moving them out of contract storage does not make executed signatures private.
 
-#### Signing and registering
+#### Contract functions
 
-For each payment, the payer signs the standard USDC `ReceiveWithAuthorization`
-EIP-712 message with:
+| Function | Purpose |
+| --- | --- |
+| `getPaymentNonce(payment)` | Read the instruction commitment to use as the USDC authorization nonce before signing. |
+| `executePayment(payment)` | Anyone submits one signed payment; any failure reverts the transaction. |
+| `executePayments(payments)` | Anyone submits 1–50 complete payment payloads. Returns the successful count and isolates item failures. |
+| `cancelSchedule(scheduleId)` | Permanently cancels this schedule for `msg.sender`. Works before the first payment executes. |
+| `cancelledSchedules(payer, scheduleId)` | Read the authoritative cancellation flag. |
+| `withdrawTips(recipient)` | Current owner withdraws the platform's earned share. |
+| `accruedTips()` | Read platform earnings available to withdraw, in six-decimal USDC units. |
+
+`executePaymentFromBatch` is a self-call worker for failure isolation and
+rejects external callers. Old functions such as `createSchedule`,
+`getPayment` and `getDuePaymentIds` have been removed. Existing deployed
+instances retain their old implementation: this change requires a **new
+deployment and freshly signed authorizations**. The current deployment record
+is preserved; deployment is a separate next step.
+
+#### Preparing and signing a payment
+
+The flat `Payment` payload has these fields:
 
 ```text
-from:        payer's wallet address
-to:          deployed PrePaid contract address
-value:       amount + tip
-validAfter:  exclusive lower bound, UNIX seconds
-validBefore: exclusive upper bound, UNIX seconds
-nonce:       unique random bytes32, never reused by that payer
+payer       address   wallet signing the USDC authorization
+scheduleId  bytes32   random nonzero ID shared by this payer's recurring occurrences
+payee       address   final payment recipient
+amount      uint256   payee amount, six-decimal USDC units
+tip         uint256   total executor + platform tip, six-decimal USDC units
+validAfter  uint256   exclusive lower bound, UNIX seconds
+validBefore uint256   exclusive upper bound, UNIX seconds
+salt        bytes32   fresh cryptographically random value for every occurrence
+v           uint8     signature v (27 or 28)
+r           bytes32   signature r
+s           bytes32   signature s
 ```
 
-Use the **USDC** EIP-712 domain, not PrePaid's address as the verifying contract:
-`name="USDC"`, `version="2"`, `verifyingContract=USDC address`, and
-`chainId=5042002` (testnet) or `5042` (mainnet). Check this domain against
-USDC's onchain `DOMAIN_SEPARATOR()` when integrating the wallet. The contract
-validates each signature using the actual onchain domain separator.
-Split the wallet's 65-byte signature into `v` (27 or 28), `r`, and `s`.
-`TransferWithAuthorization` signatures are rejected.
+Generate the schedule ID and each salt with a cryptographic random generator;
+never reuse a cancelled schedule ID for that payer. Different occurrences
+need different salts even if all their other fields are identical.
 
-The payer then calls `createSchedule(inputs)` from **the same wallet that
-signed**. This setup transaction is necessary because USDC's signature
-authorizes receiving funds at PrePaid; it does not itself specify the final
-payee or how the total splits between payment and tip. The payer's transaction
-authenticates those instructions. A third party cannot register stolen
-USDC signatures under a different payee. No approval or deposit is required,
-but setup and cancellation transactions require the payer to have USDC for gas.
-Compatible ERC-1271 payers can be validated with a 65-byte signature;
-arbitrary-length contract-wallet signatures are outside this interface.
+USDC's ordinary signature does not name the final payee or the tip split.
+PrePaid binds those instructions using the signed nonce:
 
-#### Execution and the cron job
+```text
+PAYMENT_NONCE_TYPEHASH = keccak256(
+  "PrePaidPayment(uint256 chainId,address prepaid,address usdc,address payer,bytes32 scheduleId,address payee,uint256 amount,uint256 tip,uint256 validAfter,uint256 validBefore,bytes32 salt)"
+)
 
-On each cron run, start discovery at cursor `1` and call
-`getDuePaymentIds(cursor, 100)` until the returned cursor reaches
-`nextPaymentId()`. Restart discovery on each run: a record skipped today may
-become due later. Split the returned IDs into batches of at most 50 and call
-`executePayments(ids)`. Events can also be used to track schedules offchain
-without a database. The contract rechecks state/time during execution, so
-IDs discovered before a cancellation cannot bypass it.
+nonce = keccak256(abi.encode(
+  PAYMENT_NONCE_TYPEHASH, chainId, prepaidAddress, usdcAddress,
+  payer, scheduleId, payee, amount, tip, validAfter, validBefore, salt
+))
+```
 
-Payment windows are strictly `validAfter < block.timestamp < validBefore`,
-matching USDC's EIP-3009 behavior. `Ready` checks the local schedule and time;
-it does not guarantee sufficient payer balance or that USDC is unpaused,
-unblocked, or the nonce remains unrevoked.
+Use ordinary ABI encoding, **not packed encoding**. Alternatively, call
+`getPaymentNonce(payment)` with placeholder `v=0, r=0x00…00, s=0x00…00`;
+signature fields do not affect the result. The tests independently reproduce
+this encoding using viem.
 
-For each successful payment, PrePaid receives exactly `amount + tip`,
-forwards `amount` to the stored payee, retains `tip`, and marks the payment
-executed. The whole payment is atomic. If receiving or forwarding fails,
-the payer debit, USDC nonce consumption, local execution flag, and tip
-accounting all revert. A failed batch item emits `PaymentFailed` and can be
-retried within its window; healthy items in the batch still execute.
-`PaymentSkipped` reports non-ready IDs. Duplicate IDs cannot double-pay.
-`PaymentExecuted` records the executor; **tips belong to the contract's owner,
-not the executor**, following the requested treasury/cron model.
+Sign the standard USDC `ReceiveWithAuthorization` EIP-712 message:
 
-Use gas estimation and an appropriate margin for execution. Each batch item
-has a 300,000-gas subcall allowance. Insufficient outer gas reverts with
-`InsufficientBatchGas`, rather than silently skipping due work. If a future
-USDC implementation needs more than the batch allowance, use the single
-`executePayment` function, which does not impose that subcall cap.
-On Arc, transaction gas is paid by the caller in native USDC (18 decimals).
-Set `maxFeePerGas` to at least `20_000_000_000` (20 Gwei), as Arc requires.
+```text
+from:        payer
+to:          deployed PrePaid address
+value:       amount + tip
+validAfter:  payment.validAfter
+validBefore: payment.validBefore
+nonce:       the commitment above (not an unrelated random nonce)
+```
 
-#### Cancellation and tip withdrawal
+Use USDC's domain: `name="USDC"`, `version="2"`,
+`verifyingContract=USDC address`, with the correct chain ID
+(`5042002` for testnet, `5042` for mainnet).
+Verify this against USDC's on-chain `DOMAIN_SEPARATOR()` during wallet
+integration. Split the resulting 65-byte signature into `v/r/s`, then store
+the complete payload and derived nonce off-chain. No setup transaction,
+approval, deposit, or additional application signature is required.
+The token itself verifies the authorization during execution; a
+`TransferWithAuthorization` signature will not work here. This interface
+uses the standard `v/r/s` overload; it does not promise contract-wallet or
+arbitrary-length signature support.
 
-`cancelSchedule` is effective once included onchain. It prevents all future
-executions from that schedule, does not reverse completed payments, and does
-not affect other schedules. Cancellation does not loop over signatures or
-call USDC's `cancelAuthorization`: the signed receiver is PrePaid, and its
-execution path enforces the schedule's flag. Reserved nonces remain reserved
-forever, so cancelled signatures cannot be registered again. A payer may
-also independently revoke a nonce at USDC; subsequent execution then fails.
+A compromised database/relayer can withhold payments but cannot change signed
+routing, amounts, tips, schedule IDs, windows or salts and still execute them.
+USDC signatures made for the previous contract/nonce format are incompatible.
 
-`withdrawTips(recipient)` transfers the entire `accruedTips` ledger and resets
-it to zero. A failed transfer restores that ledger. Direct donations are not
-treated as earned tips and are not withdrawn by this function. Payment
-instructions cannot be altered by the owner, and there is no upgrade mechanism.
+#### Execution, cancellation and earnings
 
-Tests cover real EIP-712 signatures, timing boundaries, replay, cancellation,
-batch failure isolation, forwarding rollback, tip withdrawals, and reentrancy.
-They run against a test-only USDC mock on Hardhat's standard EVM. Arc's native
-USDC runtime is different: a real testnet payment and cancellation should be
-verified before mainnet use. This change does not deploy a contract.
+The future relayer queries candidate database rows using the latest chain
+timestamp, checks cancellations and USDC nonce state, then submits complete
+payloads in batches of at most 50. These preliminary checks reduce wasted
+gas; the contract and USDC remain authoritative. There is no automatic
+scheduler on-chain. Payments must satisfy
+`validAfter < block.timestamp < validBefore`.
+
+For each success, PrePaid receives exactly `amount + tip`, transfers
+`amount` to the committed payee, transfers `floor(tip * 70 / 100)` to the
+executor (`msg.sender` of the single/batch entry point), and retains the
+remainder in `accruedTips`. Rounding dust goes to the platform.
+For 100 USDC plus a 1 USDC tip: the payee receives 100, the executor receives
+0.70, and the platform retains 0.30 USDC. Zero tips are supported.
+
+Receipt, forwarding and executor compensation are atomic. A failed payee
+**or executor** transfer rolls back the payer debit, nonce consumption and
+platform ledger. Each failed batch item emits `PaymentFailed` with its
+zero-based input index and revert bytes; healthy items still execute.
+A successful transaction receipt alone does not mean every item succeeded:
+reconcile `PaymentExecuted` and `PaymentFailed` events before updating DB
+statuses. USDC's `authorizationState=true` can mean execution or revocation;
+use receipt events to distinguish them. Two relayers submitting the same
+authorization cannot double-pay or earn two tips.
+
+Execution is permissionless: another executor can submit first and earn the
+70% tip. Failed items pay no tip, and tips do not guarantee reimbursement of
+gas costs. Calling through another contract pays that calling contract;
+direct EOA relayers receive the tip in their own wallet.
+
+Each batch worker has a 300,000-gas allowance. Too little outer gas reverts
+the entire batch with `InsufficientBatchGas`; use gas estimation and a margin.
+Single-payment execution has no worker gas cap. Arc gas uses native USDC
+with **18 decimals**; payment/tip amounts use the ERC-20 interface's **6
+decimals**. Arc requires a fee cap of at least 20 Gwei.
+
+Cancellation is a payer transaction and requires gas. Once included, its
+permanent flag blocks all remaining signed occurrences in that schedule,
+even if somebody retains their signatures or changes the database.
+Cancelling the same ID from another wallet affects only that wallet's
+namespace. Changing the original payload to use another schedule invalidates
+its signature. Cancellation cannot reverse an already executed payment or
+guarantee priority over a payment included first.
+
+Owner withdrawals transfer only accrued platform earnings. Direct donations
+are excluded; a failed withdrawal restores the ledger. The owner cannot
+change signed instructions or the fixed tip split, and there is no upgrade
+mechanism.
+
+Tests cover nonce encoding and tampering, real EIP-712 signatures, boundaries,
+replay/revocation, cancellation, 50-item batches, failure rollback, both tip
+transfers, rounding, ownership, withdrawals and reentrancy. The test-only
+`MockUSDC` runs on Hardhat's standard EVM and is never deployed by the Arc
+deployment script. Real Arc payment/cancellation checks remain necessary
+after deployment because local EVMs do not reproduce Arc's native runtime.
 
 References: [Arc EIP-3009 relayer](https://docs.arc.io/integrate/relayers-and-paymasters/eip-3009-relayer),
+[Arc USDC addresses](https://docs.arc.io/arc/references/contract-addresses),
 [Arc EVM differences](https://docs.arc.io/arc/references/evm-differences),
-[EIP-3009](https://eips.ethereum.org/EIPS/eip-3009),
-[Hardhat TypeScript testing](https://hardhat.org/docs/guides/testing/using-viem).
+[EIP-3009](https://eips.ethereum.org/EIPS/eip-3009).
 
 ### Check Arc USDC `receiveWithAuthorization`
 
