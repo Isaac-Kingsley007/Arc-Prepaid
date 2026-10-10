@@ -21,6 +21,168 @@ Authorization execution windows will be configured during wallet integration.
 Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 `pnpm exec tsx --test app/schedule.test.ts`.
 
+### Neon PostgreSQL setup
+
+The database uses **Postgres.js** (`postgres`) with parameterized SQL.
+The Node.js app backend and future relayer share `lib/db/`; no ORM or
+separate database package is required. Database functions are server-only.
+The wallet UI, API authentication and transaction broadcasting are separate
+integration steps and have not been connected by this change.
+
+1. Create a Neon project/database (or use your existing one). Choose a region
+   close to the app/relayer hosting. Copy the **pooled PostgreSQL connection
+   URL** from Neon's Connect dialog.
+2. Prepare the environment file from the repository root:
+
+   ```powershell
+   Copy-Item .env.local.example .env.local
+   ```
+
+   If `.env.local` already exists, add the example variables to that file
+   instead of overwriting it. Replace the placeholder `DATABASE_URL` using
+   your editor. Keep the URL private; never put it in a `NEXT_PUBLIC_`
+   variable or paste it into chat. Remote connections require TLS with
+   certificate verification. `DATABASE_POOL_MAX=3` caps connections per
+   Node process; Neon pooling also handles connections across instances.
+3. Install dependencies and create the tables:
+
+   ```powershell
+   pnpm install
+   pnpm db:migrate
+   pnpm db:check
+   ```
+
+   Success prints `Database ready. Applied: 001_payments.sql`, then confirms
+   the tables. In Neon SQL Editor you will see `prepaid_schedules`,
+   `prepaid_payments` and the migration history table `prepaid_migrations`.
+   The script creates structures but does not seed payments or send chain
+   transactions. Run it again safely: applied migrations are skipped.
+4. Run local verification without Neon credentials:
+
+   ```powershell
+   pnpm db:test
+   pnpm exec tsc --noEmit
+   ```
+
+   The test-only PGlite dependencies start embedded PostgreSQL over a local
+   TCP socket so tests exercise the **actual Postgres.js driver and SQL**.
+   They never use `DATABASE_URL`, deploy a contract, or touch Neon.
+   This embedded server is not a replacement for verifying concurrent
+   relayers against Neon/PostgreSQL in the final deployment.
+
+Commands use Node.js **22.13+**, load `.env.local`, and enable the
+`react-server` condition so shared `server-only` modules can run in CLI
+scripts. Next.js loads `.env.local` itself. For a hosting environment that
+injects variables and has no local env file, run
+`pnpm exec tsx --conditions=react-server scripts/db-migrate.ts` directly.
+Future relayer scripts importing this repository also need that condition.
+
+#### Database files and query interface
+
+| File | Purpose |
+| --- | --- |
+| `lib/db/client.ts` | Lazy shared Node.js connection pool, TLS, connection limits and cleanup. |
+| `lib/db/authorization.ts` | JSON-safe payment types, instruction validation, nonce generation, EOA signature verification and contract payload conversion. Safe to import for wallet signing; contains no database credentials. |
+| `lib/db/payments.ts` | Server-only shared repository for app backend and relayers. |
+| `db/migrations/001_payments.sql` | Tables, exact integer/hex constraints, uniqueness and discovery indexes. |
+| `lib/db/migrate.ts` | Checksummed, transactional migration runner with a transaction-scoped advisory lock. |
+| `scripts/db-migrate.ts` / `scripts/db-check.ts` | Table creation and connection/schema checks. |
+| `lib/db/payments.test.ts` | PostgreSQL integration tests without a hosted database. |
+
+Amounts, tips, block numbers and authorization timestamps are **decimal
+strings** in the repository's JSON-facing values. Do not convert them to
+JavaScript `number`. Use six-decimal USDC units; `toContractPayment(key,
+payment)` converts amounts/windows to `bigint` for viem.
+`chainId` is a supported Arc network ID, not an unrestricted large integer.
+Every schedule is scoped by chain, deployed PrePaid address, payer and a
+random nonzero bytes32 schedule ID. Each occurrence has its own random salt.
+
+Use `createPaymentRepository()` from a Node.js Server Component, Route
+Handler, authenticated backend service or CLI. Existing pages remain a UI
+preview and do not yet call these functions.
+
+| Method | Use |
+| --- | --- |
+| `saveSchedule({ ...key, payments, label?, metadata? })` | Verify and atomically store 1–50 signed occurrences. Retries with the same ordered instructions return the existing schedule; changing signed instructions is rejected. Existing labels/metadata are retained on retries. |
+| `getSchedule(key)` / `listPayerSchedules(context, payer, limit?, offset?)` | Payer schedule/history queries, scoped to the deployment. |
+| `listSchedulePayments(key)` | Read a schedule's full payment payloads and bookkeeping. |
+| `listDuePayments(context, chainTimestamp, limit?)` | Read-only relayer-page discovery; does not reserve work. |
+| `claimDuePayments(context, chainTimestamp, workerId, limit?, leaseSeconds?)` | Atomically lease up to 50 candidates; returns `claimToken` plus payments. Default lease is 120 seconds. |
+| `recordSubmission(ids, claimToken, txHash, executor)` | Atomically associate a known hash with the claimed batch; stale claims are rejected. |
+| `releaseClaims(claimToken, error, retrySeconds?)` | Release unsubmitted claims with backoff; cannot release submitted transactions. |
+| `listSubmittedPayments(context)` | Find transactions that require receipt reconciliation. |
+| `recordExecution(context, confirmedEvent)` | Record a confirmed PrePaid execution by payer + nonce, including transaction/block hash and executor. |
+| `recordSubmissionFailure(id, claimToken, txHash, error, retrySeconds?)` | Retry an item after a confirmed `PaymentFailed` event or reverted receipt. Never use for uncertain RPC responses. |
+| `recordScheduleCancellation(key, confirmedEvent)` | Mirror a confirmed cancellation. This function does not call the chain or cancel signatures. |
+| `recordAuthorizationUnavailable(context, payer, nonce)` | Mark a used/revoked USDC nonce whose execution is not known; reconcile event history first. |
+| `expirePayments(context, chainTimestamp)` | Mark unsubmitted expired windows; submitted transactions remain for receipt checks. |
+
+A server-side save call has this shape:
+
+```typescript
+const key = {
+  chainId: 5042002,
+  prepaid: deployedPrePaidAddress,
+  usdc: ARC_USDC,
+  payer: connectedWalletAddress,
+  scheduleId: randomScheduleId,
+};
+
+// signedPayments contain payee, amount, tip, validAfter, validBefore,
+// salt and v/r/s. Decimal values are strings, hex values are 0x-prefixed.
+await repository.saveSchedule({
+  ...key,
+  payments: signedPayments,
+  label: "Monthly rent",
+  metadata: { interval: "monthly", timezone: "Asia/Calcutta" },
+});
+```
+
+The signing helpers match the current contract's nonce commitment. The
+wallet integration must also check USDC's actual `DOMAIN_SEPARATOR()`
+and use the **new contract deployment**, not the previous storage-based
+contract. Only standard EOA `v/r/s` signatures are supported by this layer.
+
+#### App and relayer integration boundaries
+
+These are trusted repository methods, not public API endpoints.
+The future app backend must authenticate the wallet for account-specific
+reads and metadata writes, validate incoming JSON, and enforce rate limits.
+Signature verification protects the signed payment instructions; it does
+not authenticate an HTTP session or make unsigned labels authoritative.
+Never let a browser submit arbitrary “executed” or “cancelled” status updates.
+
+A relayer first reconciles submitted receipts, then claims candidates using
+the latest **chain block timestamp**, checks on-chain cancellation and nonce
+state, and simulates execution. Release claims when simulation proves an
+item cannot be submitted. For a locally signed transaction, persist its
+known hash with `recordSubmission` before broadcasting where possible.
+The future relayer must retain its prepared transaction for crash recovery.
+A timeout or missing receipt does not prove the transaction failed; retain
+`submitted` state and reconcile or rebroadcast the same prepared transaction.
+An expired unsubmitted lease can be reclaimed using a new claim token.
+Leases reduce duplicate submissions but do not guarantee exactly-once
+broadcast; USDC nonce consumption prevents duplicate payment on-chain.
+
+Parse every `PaymentExecuted`/`PaymentFailed` event from the expected
+contract and confirmed receipt; a successful batch transaction can contain
+failed items. Confirmed results may come from another permissionless executor.
+Only trusted chain processing calls the status-recording methods.
+Cancellation stops pending/leased discovery but leaves submitted items for
+reconciliation, since a payment could have executed before cancellation.
+Executed history remains intact. Deleting or changing database rows cannot
+cancel a still-valid USDC signature.
+
+The database retains current bookkeeping and the latest submitted hash/error,
+not a complete history of every attempt. Add an audit migration if that
+history becomes necessary. Keep applied migration files unchanged; add new
+numbered SQL files for future schema changes. Back up Neon data and isolate
+testnet/mainnet deployments; filtering includes both chain and contract.
+
+References: [Postgres.js queries and transactions](https://github.com/porsager/postgres),
+[Neon connection pooling](https://neon.com/docs/connect/connection-pooling),
+[PostgreSQL SKIP LOCKED](https://www.postgresql.org/docs/current/sql-select.html).
+
 ### Deploy PrePaid to Arc testnet
 
 The deployment uses the existing Hardhat build and one viem script,
@@ -137,12 +299,12 @@ through OpenZeppelin's two-step flow. Token checks use `decimals()` and
 | --- | --- |
 | PrePaid storage | `cancelledSchedules[payer][scheduleId]`, the platform's `accruedTips`, ownership and the immutable USDC address. |
 | USDC storage | Used or revoked authorization nonces, through `authorizationState(payer, nonce)`. |
-| Planned PostgreSQL database | Signatures, full payment instructions, derived nonces, recurrence rules, labels, discovery indexes, transaction hashes and retry bookkeeping. |
+| PostgreSQL database | Signatures, full payment instructions, derived nonces, recurrence metadata, labels, discovery indexes, transaction hashes and retry bookkeeping. |
 | Transaction receipts | Successful payments, failed batch items, cancellations and withdrawals. |
 
 There is no on-chain schedule registration, payment array, signature storage,
-payment counter, or duplicate execution flag. The database is planned for the
-next phase; no database or cron integration is implemented in this change.
+payment counter, or duplicate execution flag. The database schema and shared
+queries are implemented; wallet UI and cron integration remain the next steps.
 Submitted payment details and signatures are public transaction calldata;
 moving them out of contract storage does not make executed signatures private.
 
