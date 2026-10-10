@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { encodeFunctionData, getAddress, keccak256, parseSignature, toHex, zeroAddress, type Address, type Hex, type TypedDataDomain } from "viem";
+import {
+  encodeAbiParameters, encodeFunctionData, getAddress, keccak256, parseSignature,
+  toHex, zeroAddress, zeroHash, type Address, type Hex, type TypedDataDomain,
+} from "viem";
 
 const { viem, networkHelpers } = await network.create();
 const types = {
   ReceiveWithAuthorization: [
-    { name: "from", type: "address" },
-    { name: "to", type: "address" },
-    { name: "value", type: "uint256" },
-    { name: "validAfter", type: "uint256" },
-    { name: "validBefore", type: "uint256" },
-    { name: "nonce", type: "bytes32" },
+    { name: "from", type: "address" }, { name: "to", type: "address" },
+    { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" },
+    { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" },
   ],
 } as const;
 
@@ -24,309 +24,315 @@ async function deployFixture() {
   return { owner, payer, payee, relayer, other, usdc, prepaid, publicClient };
 }
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
-type Fields = { payee: Address; amount: bigint; tip: bigint; validAfter: bigint; validBefore: bigint; nonce: Hex };
+type Payment = {
+  payer: Address; scheduleId: Hex; payee: Address; amount: bigint; tip: bigint;
+  validAfter: bigint; validBefore: bigint; salt: Hex; v: number; r: Hex; s: Hex;
+};
+const schedule = keccak256(toHex("schedule"));
+let sequence = 0;
 
-async function signedPayment(f: Fixture, overrides: Partial<Fields> = {}, signer = f.payer, target = f.prepaid.address, primaryType: "ReceiveWithAuthorization" | "TransferWithAuthorization" = "ReceiveWithAuthorization", domainOverrides: Partial<TypedDataDomain> = {}) {
+async function signedPayment(
+  f: Fixture, overrides: Partial<Payment> = {}, signer = f.payer,
+  target = f.prepaid.address,
+  primaryType: "ReceiveWithAuthorization" | "TransferWithAuthorization" = "ReceiveWithAuthorization",
+  domainOverrides: Partial<TypedDataDomain> = {},
+) {
   const now = BigInt(await networkHelpers.time.latest());
-  const fields: Fields = {
-    payee: f.payee.account.address,
-    amount: 100_000_000n,
-    tip: 1_000_000n,
-    validAfter: now + 100n,
-    validBefore: now + 1_000n,
-    nonce: keccak256(toHex(`payment-${now}-${await f.prepaid.read.nextPaymentId()}`)),
+  const payment: Payment = {
+    payer: f.payer.account.address, scheduleId: schedule, payee: f.payee.account.address,
+    amount: 100_000_000n, tip: 1_000_000n, validAfter: now + 100n, validBefore: now + 1_000n,
+    salt: keccak256(toHex("occurrence-" + sequence++)), v: 27, r: zeroHash, s: zeroHash,
     ...overrides,
   };
-  const message = {
-    from: signer.account.address,
-    to: target,
-    value: fields.amount + fields.tip,
-    validAfter: fields.validAfter,
-    validBefore: fields.validBefore,
-    nonce: fields.nonce,
-  };
+  const nonce = await f.prepaid.read.getPaymentNonce([payment]);
   const signature = await signer.signTypedData({
     domain: { name: "USDC", version: "2", chainId: await f.publicClient.getChainId(), verifyingContract: f.usdc.address, ...domainOverrides },
-    types: { ...types, TransferWithAuthorization: types.ReceiveWithAuthorization },
-    primaryType,
-    message,
+    types: { ...types, TransferWithAuthorization: types.ReceiveWithAuthorization }, primaryType,
+    message: { from: payment.payer, to: target, value: payment.amount + payment.tip,
+      validAfter: payment.validAfter, validBefore: payment.validBefore, nonce },
   });
   const parsed = parseSignature(signature);
-  return { ...fields, v: Number(parsed.v ?? BigInt(parsed.yParity!) + 27n), r: parsed.r, s: parsed.s };
+  return { ...payment, v: Number(parsed.v ?? BigInt(parsed.yParity!) + 27n), r: parsed.r, s: parsed.s };
 }
-
-async function register(f: Fixture, payments: Awaited<ReturnType<typeof signedPayment>>[]) {
-  return f.prepaid.write.createSchedule([payments], { account: f.payer.account });
+async function activate(payment: Payment) {
+  await networkHelpers.time.increaseTo(payment.validAfter + 1n);
 }
-async function executeBatch(f: Fixture, ids: bigint[]) {
-  const hash = await f.prepaid.write.executePayments([ids], { account: f.relayer.account, gas: 2_000_000n });
+async function execute(f: Fixture, payment: Payment) {
+  return f.prepaid.write.executePayment([payment], { account: f.relayer.account });
+}
+async function executeBatch(f: Fixture, payments: Payment[], gas?: bigint) {
+  const hash = await f.prepaid.write.executePayments([payments], { account: f.relayer.account, ...(gas ? { gas } : {}) });
   const receipt = await f.publicClient.waitForTransactionReceipt({ hash });
   assert.equal(receipt.status, "success");
   return receipt;
 }
+async function assertUntouched(f: Fixture, payment: Payment) {
+  assert.equal(await f.usdc.read.balanceOf([f.payer.account.address]), 1_000_000_000n);
+  assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), 0n);
+  assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), 0n);
+  assert.equal(await f.prepaid.read.accruedTips(), 0n);
+  assert.equal(await f.usdc.read.authorizationState([payment.payer, await f.prepaid.read.getPaymentNonce([payment])]), false);
+}
 
-describe("PrePaid", { concurrency: false }, () => {
-  it("stores signatures and forwarding instructions without taking funds or approvals", async () => {
+describe("PrePaid offchain authorizations", { concurrency: false }, () => {
+  it("executes without registration, approval or deposit and splits the tip 70/30", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    const payment = await f.prepaid.read.getPayment([1n]);
-    assert.equal(payment.scheduleId, 1n);
-    assert.equal(getAddress(payment.payee), getAddress(p.payee));
-    for (const key of ["amount", "tip", "validAfter", "validBefore", "nonce", "v", "r", "s"] as const) assert.equal(payment[key], p[key]);
-    assert.equal(payment.executed, false);
-    const schedule = await f.prepaid.read.schedules([1n]);
-    assert.equal(getAddress(schedule[0]), getAddress(f.payer.account.address));
-    assert.deepEqual(schedule.slice(1), [1n, 1n, false]);
-    assert.equal(await f.usdc.read.balanceOf([f.payer.account.address]), 1_000_000_000n);
-    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 0n);
-    assert.equal(await f.usdc.read.allowance([f.payer.account.address, f.prepaid.address]), 0n);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p.nonce]), false);
+    await assertUntouched(f, p);
+    assert.equal(await f.usdc.read.allowance([p.payer, f.prepaid.address]), 0n);
+    await activate(p);
+    const receipt = await f.publicClient.waitForTransactionReceipt({ hash: await execute(f, p) });
+    assert.equal(await f.usdc.read.balanceOf([p.payer]), 899_000_000n);
+    assert.equal(await f.usdc.read.balanceOf([p.payee]), p.amount);
+    assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), 700_000n);
+    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 300_000n);
+    assert.equal(await f.prepaid.read.accruedTips(), 300_000n);
+    const events = await f.publicClient.getContractEvents({
+      address: f.prepaid.address, abi: f.prepaid.abi, eventName: "PaymentExecuted",
+      fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber,
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].args.nonce, await f.prepaid.read.getPaymentNonce([p]));
+    assert.equal(getAddress(events[0].args.executor!), getAddress(f.relayer.account.address));
+    assert.equal(events[0].args.relayerTip, 700_000n);
+    assert.equal(events[0].args.platformTip, 300_000n);
+    await assert.rejects(execute(f, p), /authorization is used or canceled/);
   });
 
-  it("receives the total, pays the intended payee, retains only the tip and cannot execute twice", async () => {
+  it("matches independently ABI-encoded nonce commitments and ignores signature fields", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    const hash = await f.prepaid.write.executePayment([1n], { account: f.relayer.account });
-    const receipt = await f.publicClient.waitForTransactionReceipt({ hash });
-    assert.equal(receipt.status, "success");
-    assert.equal(await f.usdc.read.balanceOf([f.payer.account.address]), 899_000_000n);
-    assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), p.amount);
-    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), p.tip);
-    assert.equal(await f.prepaid.read.accruedTips(), p.tip);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p.nonce]), true);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 3);
-    await assert.rejects(f.prepaid.write.executePayment([1n]), /PaymentNotExecutable/);
+    const expected = keccak256(encodeAbiParameters([
+      { type: "bytes32" }, { type: "uint256" }, { type: "address" }, { type: "address" },
+      { type: "address" }, { type: "bytes32" }, { type: "address" }, { type: "uint256" },
+      { type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "bytes32" },
+    ], [keccak256(toHex("PrePaidPayment(uint256 chainId,address prepaid,address usdc,address payer,bytes32 scheduleId,address payee,uint256 amount,uint256 tip,uint256 validAfter,uint256 validBefore,bytes32 salt)")),
+      BigInt(await f.publicClient.getChainId()), f.prepaid.address, f.usdc.address,
+      p.payer, p.scheduleId, p.payee, p.amount, p.tip, p.validAfter, p.validBefore, p.salt]));
+    assert.equal(await f.prepaid.read.getPaymentNonce([p]), expected);
+    assert.equal(await f.prepaid.read.getPaymentNonce([{ ...p, v: 0, r: zeroHash, s: zeroHash }]), expected);
+    const second = await viem.deployContract("PrePaid", [f.usdc.address]);
+    assert.notEqual(await second.read.getPaymentNonce([p]), expected);
   });
 
-  it("uses exclusive EIP-3009 boundaries and never executes too early or after expiry", async () => {
+  it("rejects tampered routing, same-total tip changes, cancellation IDs, salts and windows", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 1);
-    await assert.rejects(f.prepaid.write.executePayment([1n]), /PaymentNotExecutable/);
+    await activate(p);
+    const changes: Partial<Payment>[] = [
+      { payee: f.other.account.address }, { amount: p.amount - 1n, tip: p.tip + 1n },
+      { scheduleId: keccak256(toHex("another-schedule")) }, { salt: keccak256(toHex("another-salt")) },
+      { validAfter: p.validAfter - 1n }, { validBefore: p.validBefore + 1n },
+      { payer: f.other.account.address },
+    ];
+    for (const change of changes) await assert.rejects(execute(f, { ...p, ...change }), /Invalid signature/);
+    await assertUntouched(f, p);
+    await execute(f, p);
+  });
+
+  it("rejects signatures for another caller destination, signer, message type or token domain", async () => {
+    const f = await networkHelpers.loadFixture(deployFixture);
+    const payments = [
+      await signedPayment(f, {}, f.payer, f.other.account.address),
+      await signedPayment(f, {}, f.other),
+      await signedPayment(f, {}, f.payer, f.prepaid.address, "TransferWithAuthorization"),
+      await signedPayment(f, {}, f.payer, f.prepaid.address, "ReceiveWithAuthorization", { chainId: 5042 }),
+      await signedPayment(f, {}, f.payer, f.prepaid.address, "ReceiveWithAuthorization", { verifyingContract: f.other.account.address }),
+    ];
+    await activate(payments[0]);
+    for (const p of payments) await assert.rejects(execute(f, p), /Invalid signature/);
+    await assertUntouched(f, payments[0]);
+  });
+
+  it("enforces exclusive EIP-3009 window boundaries", async () => {
+    const f = await networkHelpers.loadFixture(deployFixture);
+    const p = await signedPayment(f);
+    const simulate = () => f.publicClient.simulateContract({
+      address: f.prepaid.address, abi: f.prepaid.abi, functionName: "executePayment",
+      args: [p], account: f.relayer.account,
+    });
+    await assert.rejects(simulate(), /PaymentOutsideWindow/);
     await networkHelpers.time.increaseTo(p.validAfter);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 1);
-    await assert.rejects(f.publicClient.simulateContract({ address: f.prepaid.address, abi: f.prepaid.abi, functionName: "executePayment", args: [1n], account: f.relayer.account }), /PaymentNotExecutable/);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 2);
+    await assert.rejects(simulate(), /PaymentOutsideWindow/);
+    await activate(p);
+    await simulate();
     await networkHelpers.time.increaseTo(p.validBefore);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 5);
-    await assert.rejects(f.prepaid.write.executePayment([1n]), /PaymentNotExecutable/);
-    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 0n);
+    await assert.rejects(simulate(), /PaymentOutsideWindow/);
+    await assertUntouched(f, p);
   });
 
-  it("prevents another user registering a stolen authorization with a different payee or tip", async () => {
+  it("rejects invalid payer, schedule, payee, amount and windows", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await assert.rejects(f.prepaid.write.createSchedule([[{ ...p, payee: f.other.account.address }]], { account: f.other.account }), /InvalidSignature/);
-    await assert.rejects(register(f, [{ ...p, amount: p.amount - 1n }]), /InvalidSignature/);
-    assert.equal(await f.prepaid.read.nextPaymentId(), 1n);
+    await activate(p);
+    const invalid: Partial<Payment>[] = [
+      { payer: zeroAddress }, { scheduleId: zeroHash }, { payee: zeroAddress },
+      { payee: f.prepaid.address }, { payee: f.usdc.address }, { amount: 0n },
+      { validBefore: p.validAfter }, { validBefore: p.validAfter - 1n },
+    ];
+    for (const change of invalid) await assert.rejects(execute(f, { ...p, ...change }), /InvalidPayment/);
+    await assertUntouched(f, p);
   });
 
-  it("rejects signatures for another destination, another signer, or TransferWithAuthorization", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    await assert.rejects(register(f, [await signedPayment(f, {}, f.payer, f.other.account.address)]), /InvalidSignature/);
-    await assert.rejects(register(f, [await signedPayment(f, {}, f.other)]), /InvalidSignature/);
-    await assert.rejects(register(f, [await signedPayment(f, {}, f.payer, f.prepaid.address, "TransferWithAuthorization")]), /InvalidSignature/);
-  });
-
-  it("rejects signatures from another chain or another token's EIP-712 domain", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    for (const domain of [{ chainId: 5042 }, { verifyingContract: f.other.account.address }]) {
-      const p = await signedPayment(f, {}, f.payer, f.prepaid.address, "ReceiveWithAuthorization", domain);
-      await assert.rejects(register(f, [p]), /InvalidSignature/);
-    }
-  });
-
-  it("rejects empty/oversized schedules, invalid payees, amounts and windows", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    await assert.rejects(register(f, []), /InvalidBatchSize/);
-    const p = await signedPayment(f);
-    await assert.rejects(register(f, Array(51).fill(p)), /InvalidBatchSize/);
-    for (const payee of [zeroAddress, f.prepaid.address, f.usdc.address]) await assert.rejects(register(f, [{ ...p, payee }]), /InvalidPayment/);
-    await assert.rejects(register(f, [{ ...p, amount: 0n }]), /InvalidPayment/);
-    await assert.rejects(register(f, [{ ...p, validBefore: p.validAfter }]), /InvalidPayment/);
-    await assert.rejects(register(f, [{ ...p, validBefore: 1n, validAfter: 0n }]), /InvalidPayment/);
-  });
-
-  it("rejects duplicate nonces within/across schedules and authorizations already revoked at USDC", async () => {
+  it("cancels before first execution and cannot bypass cancellation by rewriting scheduleId", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await assert.rejects(register(f, [p, p]), /NonceUnavailable/);
-    assert.equal(await f.prepaid.read.nextScheduleId(), 1n);
-    await register(f, [p]);
-    await assert.rejects(register(f, [p]), /NonceUnavailable/);
-    const revoked = await signedPayment(f);
-    await f.usdc.write.cancelAuthorization([revoked.nonce], { account: f.payer.account });
-    await assert.rejects(register(f, [revoked]), /NonceUnavailable/);
+    const p2 = await signedPayment(f, { validAfter: p.validAfter, validBefore: p.validBefore });
+    await f.prepaid.write.cancelSchedule([schedule], { account: f.payer.account });
+    await activate(p);
+    for (const payment of [p, p2]) await assert.rejects(execute(f, payment), /ScheduleCancelled/);
+    await assert.rejects(execute(f, { ...p, scheduleId: keccak256(toHex("bypass")) }), /Invalid signature/);
+    await assertUntouched(f, p);
+    await assert.rejects(f.prepaid.write.cancelSchedule([schedule], { account: f.payer.account }), /ScheduleAlreadyCancelled/);
+    await assert.rejects(f.prepaid.write.cancelSchedule([zeroHash], { account: f.payer.account }), /InvalidScheduleId/);
   });
 
-  it("cancels all remaining schedule payments while preserving executed payments and other schedules", async () => {
+  it("scopes cancellations to the caller, preserves past payments and other schedules", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    const p2 = await signedPayment(f, { nonce: keccak256(toHex("second")) });
-    await register(f, [p, p2]);
-    const p3 = await signedPayment(f);
-    await register(f, [p3]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await f.prepaid.write.executePayment([1n]);
-    await f.prepaid.write.cancelSchedule([1n], { account: f.payer.account });
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 3);
-    assert.equal(await f.prepaid.read.getPaymentState([2n]), 4);
-    await assert.rejects(f.prepaid.write.executePayment([2n]), /PaymentNotExecutable/);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p2.nonce]), false);
-    await assert.rejects(register(f, [p2]), /NonceUnavailable/);
-    await f.prepaid.write.executePayment([3n]);
-    assert.equal(await f.prepaid.read.accruedTips(), p.tip + p3.tip);
+    const remaining = await signedPayment(f, { validAfter: p.validAfter, validBefore: p.validBefore });
+    const other = await signedPayment(f, { scheduleId: keccak256(toHex("other")) });
+    await f.prepaid.write.cancelSchedule([schedule], { account: f.other.account });
+    assert.equal(await f.prepaid.read.cancelledSchedules([p.payer, schedule]), false);
+    await activate(p);
+    await execute(f, p);
+    await f.prepaid.write.cancelSchedule([schedule], { account: f.payer.account });
+    await assert.rejects(execute(f, remaining), /ScheduleCancelled/);
+    await execute(f, other);
+    assert.equal(await f.usdc.read.balanceOf([p.payee]), p.amount + other.amount);
+    assert.equal(await f.prepaid.read.accruedTips(), 600_000n);
   });
 
-  it("only the corresponding payer may cancel; repeated and unknown cancellations are rejected", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    await register(f, [await signedPayment(f)]);
-    for (const account of [f.owner.account, f.relayer.account, f.other.account]) await assert.rejects(f.prepaid.write.cancelSchedule([1n], { account }), /NotSchedulePayer/);
-    await assert.rejects(f.prepaid.write.cancelSchedule([99n], { account: f.payer.account }), /UnknownSchedule/);
-    await f.prepaid.write.cancelSchedule([1n], { account: f.payer.account });
-    await assert.rejects(f.prepaid.write.cancelSchedule([1n], { account: f.payer.account }), /ScheduleAlreadyCancelled/);
-  });
-
-  it("rolls back the payer debit, nonce, execution and tip if forwarding is rejected, then retries", async () => {
+  it("uses fresh salts for distinct occurrences and USDC for replay/revocation", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await f.usdc.write.setBlocked([f.payee.account.address, true]);
-    await assert.rejects(f.prepaid.write.executePayment([1n]), /USDC blocklisted/);
-    assert.equal(await f.usdc.read.balanceOf([f.payer.account.address]), 1_000_000_000n);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p.nonce]), false);
-    assert.equal((await f.prepaid.read.getPayment([1n])).executed, false);
-    assert.equal(await f.prepaid.read.accruedTips(), 0n);
-    await f.usdc.write.setBlocked([f.payee.account.address, false]);
-    await f.prepaid.write.executePayment([1n]);
-    assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), p.amount);
+    const p2 = await signedPayment(f, { validAfter: p.validAfter, validBefore: p.validBefore });
+    assert.notEqual(await f.prepaid.read.getPaymentNonce([p]), await f.prepaid.read.getPaymentNonce([p2]));
+    await activate(p);
+    await execute(f, p);
+    await execute(f, p2);
+    await assert.rejects(execute(f, p), /authorization is used or canceled/);
+    const revoked = await signedPayment(f, { validAfter: p.validAfter, validBefore: p.validBefore });
+    await f.usdc.write.cancelAuthorization([await f.prepaid.read.getPaymentNonce([revoked])], { account: f.payer.account });
+    await assert.rejects(execute(f, revoked), /authorization is used or canceled/);
+    assert.equal(await f.usdc.read.balanceOf([p.payee]), p.amount + p2.amount);
   });
 
-  it("treats an ERC-20 false return as failure and leaves the authorization available", async () => {
+  for (const blockedRecipient of ["payee", "relayer"] as const) {
+    it("rolls back receipt, nonce and both tips when " + blockedRecipient + " is blocklisted, then retries", async () => {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const p = await signedPayment(f);
+      await activate(p);
+      await f.usdc.write.setBlocked([f[blockedRecipient].account.address, true]);
+      await assert.rejects(execute(f, p), /USDC blocklisted/);
+      await assertUntouched(f, p);
+      await f.usdc.write.setBlocked([f[blockedRecipient].account.address, false]);
+      await execute(f, p);
+      assert.equal(await f.prepaid.read.accruedTips(), 300_000n);
+    });
+  }
+
+  it("rolls back on ERC20 false returns and silent receive successes", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
+    await activate(p);
     await f.usdc.write.setFailTransfers([true]);
-    await assert.rejects(f.prepaid.write.executePayment([1n]), /SafeERC20FailedOperation/);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p.nonce]), false);
-    assert.equal(await f.usdc.read.balanceOf([f.payer.account.address]), 1_000_000_000n);
-    assert.equal(await f.prepaid.read.accruedTips(), 0n);
-  });
-
-  it("never spends existing contract funds if receiving silently returns without transferring", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    const p = await signedPayment(f);
-    await register(f, [p]);
+    await assert.rejects(execute(f, p), /SafeERC20FailedOperation/);
+    await assertUntouched(f, p);
+    await f.usdc.write.setFailTransfers([false]);
     await f.usdc.write.mint([f.prepaid.address, 500_000_000n]);
     await f.usdc.write.setNoReceive([true]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await assert.rejects(f.prepaid.write.executePayment([1n]), /UnexpectedUSDCBalance/);
+    await assert.rejects(execute(f, p), /UnexpectedUSDCBalance/);
+    await assertUntouched(f, p);
     assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 500_000_000n);
-    assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), 0n);
-    assert.equal(await f.prepaid.read.accruedTips(), 0n);
   });
 
-  it("isolates a failed payment in a batch, executes a healthy one, and skips unknown or duplicate IDs", async () => {
+  it("isolates failed, cancelled, pending, expired and duplicate batch entries", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
-    const p1 = await signedPayment(f, { payee: f.other.account.address });
-    const p2 = await signedPayment(f, { nonce: keccak256(toHex("healthy")) });
-    await register(f, [p1, p2]);
-    await networkHelpers.time.increaseTo(p2.validAfter + 1n);
+    const good = await signedPayment(f);
+    const blocked = await signedPayment(f, { payee: f.other.account.address });
+    const cancelled = await signedPayment(f, { scheduleId: keccak256(toHex("cancelled")) });
+    const pending = await signedPayment(f, { validAfter: good.validAfter + 500n });
+    const expired = await signedPayment(f, { validAfter: 0n, validBefore: good.validAfter });
+    await f.prepaid.write.cancelSchedule([cancelled.scheduleId], { account: f.payer.account });
     await f.usdc.write.setBlocked([f.other.account.address, true]);
-    const receipt = await executeBatch(f, [1n, 2n, 2n, 999n]);
-    const failures = await f.publicClient.getContractEvents({ address: f.prepaid.address, abi: f.prepaid.abi, eventName: "PaymentFailed", fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber });
-    assert.equal(failures.length, 1);
-    assert.equal(failures[0].args.paymentId, 1n);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 2);
-    assert.equal(await f.prepaid.read.getPaymentState([2n]), 3);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p1.nonce]), false);
-    assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), p2.amount);
-    assert.equal(await f.prepaid.read.accruedTips(), p2.tip);
+    await activate(good);
+    const payments = [blocked, cancelled, pending, expired, good, good];
+    const simulation = await f.publicClient.simulateContract({
+      address: f.prepaid.address, abi: f.prepaid.abi, functionName: "executePayments",
+      args: [payments], account: f.relayer.account, gas: 3_000_000n,
+    });
+    assert.equal(simulation.result, 1n);
+    const receipt = await executeBatch(f, payments);
+    const failures = await f.publicClient.getContractEvents({
+      address: f.prepaid.address, abi: f.prepaid.abi, eventName: "PaymentFailed",
+      fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber,
+    });
+    assert.deepEqual(failures.map((event) => event.args.index), [0n, 1n, 2n, 3n, 5n]);
+    assert.equal(await f.usdc.read.authorizationState([blocked.payer, await f.prepaid.read.getPaymentNonce([blocked])]), false);
+    assert.equal(await f.usdc.read.balanceOf([good.payee]), good.amount);
+    assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), 700_000n);
+    assert.equal(await f.prepaid.read.accruedTips(), 300_000n);
   });
 
-  it("skips non-ready batches and rejects empty/oversized batches and direct worker calls", async () => {
+  it("rejects empty/oversized batches, direct worker calls and insufficient outer gas", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await executeBatch(f, [1n, 0n]);
-    assert.equal(await f.prepaid.read.accruedTips(), 0n);
+    await activate(p);
     await assert.rejects(f.prepaid.write.executePayments([[]]), /InvalidBatchSize/);
-    await assert.rejects(f.prepaid.write.executePayments([Array(51).fill(1n)]), /InvalidBatchSize/);
-    await assert.rejects(f.prepaid.write.executePaymentFromBatch([1n, f.relayer.account.address]), /OnlySelf/);
+    await assert.rejects(f.prepaid.write.executePayments([Array(51).fill(p)]), /InvalidBatchSize/);
+    await assert.rejects(f.prepaid.write.executePaymentFromBatch([p, f.other.account.address]), /OnlySelf/);
+    await assert.rejects(executeBatch(f, [p], 150_000n), /InsufficientBatchGas/);
+    await assertUntouched(f, p);
   });
 
-  it("rejects a low-gas batch without consuming the authorization", async () => {
+  it("executes 50 payments with normal gas estimation and credits the actual batch caller", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
-    const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await assert.rejects(f.prepaid.write.executePayments([[1n]], { account: f.relayer.account, gas: 150_000n }), /InsufficientBatchGas/);
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 2);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p.nonce]), false);
-  });
-
-  it("normal gas estimation attempts all ready payments rather than silently doing no work", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    const p = await signedPayment(f);
-    const p2 = await signedPayment(f, { nonce: keccak256(toHex("estimated-batch")) });
-    await register(f, [p, p2]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    const hash = await f.prepaid.write.executePayments([[1n, 2n]], { account: f.relayer.account });
-    const receipt = await f.publicClient.waitForTransactionReceipt({ hash });
-    assert.equal(receipt.status, "success");
-    assert.equal(await f.prepaid.read.getPaymentState([1n]), 3);
-    assert.equal(await f.prepaid.read.getPaymentState([2n]), 3);
-    assert.equal(await f.prepaid.read.accruedTips(), p.tip + p2.tip);
-  });
-
-  it("registers and executes the maximum 50-payment schedule with normal gas estimation", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    const payments = [];
+    const payments: Payment[] = [];
+    const now = BigInt(await networkHelpers.time.latest());
     for (let i = 0; i < 50; i++) payments.push(await signedPayment(f, {
-      amount: 1_000_000n, tip: 10_000n, nonce: keccak256(toHex(`max-schedule-${i}`)),
+      amount: 1_000_000n, tip: 10_000n, validAfter: now + 100n, validBefore: now + 1_000n,
     }));
-    await register(f, payments);
-    await networkHelpers.time.increaseTo(payments[0].validAfter + 1n);
-    const ids = Array.from({ length: 50 }, (_, index) => BigInt(index + 1));
-    const hash = await f.prepaid.write.executePayments([ids], { account: f.relayer.account });
-    const receipt = await f.publicClient.waitForTransactionReceipt({ hash });
-    assert.equal(receipt.status, "success");
+    await activate(payments[0]);
+    await executeBatch(f, payments);
     assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), 50_000_000n);
-    assert.equal(await f.prepaid.read.accruedTips(), 500_000n);
-    for (const id of ids) assert.equal(await f.prepaid.read.getPaymentState([id]), 3);
+    assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), 350_000n);
+    assert.equal(await f.prepaid.read.accruedTips(), 150_000n);
+    for (const p of payments) assert.equal(await f.usdc.read.authorizationState([p.payer, await f.prepaid.read.getPaymentNonce([p])]), true);
   });
 
-  it("handles insufficient payer funds, revoked authorization, and paused USDC without losing a payment", async () => {
+  it("keeps underfunded or paused payments retryable within their windows", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f, { amount: 2_000_000_000n });
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await executeBatch(f, [1n]);
-    assert.equal(await f.usdc.read.authorizationState([f.payer.account.address, p.nonce]), false);
-    await f.usdc.write.mint([f.payer.account.address, 2_000_000_000n]);
+    await activate(p);
+    await executeBatch(f, [p]);
+    await assertUntouched(f, p);
+    await f.usdc.write.mint([p.payer, 2_000_000_000n]);
     await f.usdc.write.setPaused([true]);
-    await executeBatch(f, [1n]);
-    assert.equal((await f.prepaid.read.getPayment([1n])).executed, false);
+    await executeBatch(f, [p]);
+    assert.equal(await f.usdc.read.authorizationState([p.payer, await f.prepaid.read.getPaymentNonce([p])]), false);
     await f.usdc.write.setPaused([false]);
-    await f.usdc.write.cancelAuthorization([p.nonce], { account: f.payer.account });
-    await executeBatch(f, [1n]);
-    assert.equal((await f.prepaid.read.getPayment([1n])).executed, false);
-    assert.equal(await f.prepaid.read.accruedTips(), 0n);
+    await executeBatch(f, [p]);
+    assert.equal(await f.prepaid.read.accruedTips(), 300_000n);
   });
 
-  it("withdraws only accrued tips as owner, protects donations, and supports two-step ownership", async () => {
+  it("handles zero tips and rounds fractional relayer units down to the platform", async () => {
+    const f = await networkHelpers.loadFixture(deployFixture);
+    const first = await signedPayment(f, { tip: 0n });
+    const second = await signedPayment(f, { tip: 1n });
+    const third = await signedPayment(f, { tip: 11n });
+    await activate(first);
+    await executeBatch(f, [first, second, third]);
+    assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), 7n);
+    assert.equal(await f.prepaid.read.accruedTips(), 5n);
+    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 5n);
+  });
+
+  it("withdraws only the platform share, protects donations and supports two-step ownership", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await f.prepaid.write.executePayment([1n]);
+    await activate(p);
+    await execute(f, p);
     await f.usdc.write.mint([f.prepaid.address, 5_000_000n]);
     await assert.rejects(f.prepaid.write.withdrawTips([f.other.account.address], { account: f.other.account }), /OwnableUnauthorizedAccount/);
     for (const recipient of [zeroAddress, f.prepaid.address, f.usdc.address]) await assert.rejects(f.prepaid.write.withdrawTips([recipient]), /InvalidRecipient/);
@@ -334,58 +340,43 @@ describe("PrePaid", { concurrency: false }, () => {
     assert.equal(getAddress(await f.prepaid.read.owner()), getAddress(f.owner.account.address));
     await f.prepaid.write.acceptOwnership({ account: f.other.account });
     await assert.rejects(f.prepaid.write.withdrawTips([f.owner.account.address]), /OwnableUnauthorizedAccount/);
-    await f.prepaid.write.withdrawTips([f.relayer.account.address], { account: f.other.account });
-    assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), p.tip);
+    await f.prepaid.write.withdrawTips([f.other.account.address], { account: f.other.account });
+    assert.equal(await f.usdc.read.balanceOf([f.other.account.address]), 300_000n);
+    assert.equal(await f.usdc.read.balanceOf([f.relayer.account.address]), 700_000n);
     assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 5_000_000n);
     assert.equal(await f.prepaid.read.accruedTips(), 0n);
-    await assert.rejects(f.prepaid.write.withdrawTips([f.relayer.account.address], { account: f.other.account }), /NoTips/);
+    await assert.rejects(f.prepaid.write.withdrawTips([f.other.account.address], { account: f.other.account }), /NoTips/);
   });
 
-  it("restores the accrued tip ledger when withdrawal fails", async () => {
+  it("restores platform tip accounting when a withdrawal transfer fails", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await f.prepaid.write.executePayment([1n]);
+    await activate(p);
+    await execute(f, p);
     await f.usdc.write.setBlocked([f.owner.account.address, true]);
     await assert.rejects(f.prepaid.write.withdrawTips([f.owner.account.address]), /USDC blocklisted/);
-    assert.equal(await f.prepaid.read.accruedTips(), p.tip);
-    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), p.tip);
+    assert.equal(await f.prepaid.read.accruedTips(), 300_000n);
+    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 300_000n);
   });
 
-  it("blocks reentrancy into execution during forwarding", async () => {
+  it("blocks reentry into single execution, batch execution, cancellation, withdrawal and the batch worker", async () => {
     const f = await networkHelpers.loadFixture(deployFixture);
     const p = await signedPayment(f);
-    await register(f, [p]);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    await f.usdc.write.setCallback([f.prepaid.address, encodeFunctionData({ abi: f.prepaid.abi, functionName: "executePayment", args: [1n] })]);
-    await executeBatch(f, [1n]);
-    assert.equal(await f.usdc.read.callbackSucceeded(), false);
-    assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), p.amount);
-    assert.equal(await f.prepaid.read.accruedTips(), p.tip);
-  });
-
-  it("allows zero tips and returns bounded due-payment and payer-schedule pages", async () => {
-    const f = await networkHelpers.loadFixture(deployFixture);
-    const p = await signedPayment(f, { tip: 0n });
-    await register(f, [p]);
-    const p2 = await signedPayment(f, { validAfter: p.validAfter + 500n });
-    await register(f, [p2]);
-    assert.equal(await f.prepaid.read.payerScheduleCount([f.payer.account.address]), 2n);
-    assert.deepEqual(await f.prepaid.read.getPayerScheduleIds([f.payer.account.address, 0n, 1n]), [1n]);
-    assert.deepEqual(await f.prepaid.read.getPayerScheduleIds([f.payer.account.address, 1n, 100n]), [2n]);
-    assert.deepEqual(await f.prepaid.read.getPayerScheduleIds([f.payer.account.address, 999n, 1n]), []);
-    await assert.rejects(f.prepaid.read.getPayerScheduleIds([f.payer.account.address, 0n, 101n]), /InvalidBatchSize/);
-    await networkHelpers.time.increaseTo(p.validAfter + 1n);
-    assert.deepEqual(await f.prepaid.read.getDuePaymentIds([0n, 100n]), [[1n], 3n]);
-    assert.deepEqual(await f.prepaid.read.getDuePaymentIds([1n, 1n]), [[1n], 2n]);
-    assert.deepEqual(await f.prepaid.read.getDuePaymentIds([2n, 1n]), [[], 3n]);
-    assert.deepEqual(await f.prepaid.read.getDuePaymentIds([999n, 100n]), [[], 3n]);
-    await assert.rejects(f.prepaid.read.getDuePaymentIds([1n, 0n]), /InvalidBatchSize/);
-    await assert.rejects(f.prepaid.read.getDuePaymentIds([1n, 101n]), /InvalidBatchSize/);
-    await f.prepaid.write.executePayment([1n]);
-    assert.equal(await f.prepaid.read.accruedTips(), 0n);
-    assert.equal(await f.usdc.read.balanceOf([f.prepaid.address]), 0n);
-    assert.deepEqual(await f.prepaid.read.getDuePaymentIds([1n, 100n]), [[], 3n]);
+    await activate(p);
+    const attempts = [
+      encodeFunctionData({ abi: f.prepaid.abi, functionName: "executePayment", args: [p] }),
+      encodeFunctionData({ abi: f.prepaid.abi, functionName: "executePayments", args: [[p]] }),
+      encodeFunctionData({ abi: f.prepaid.abi, functionName: "cancelSchedule", args: [schedule] }),
+      encodeFunctionData({ abi: f.prepaid.abi, functionName: "withdrawTips", args: [f.other.account.address] }),
+      encodeFunctionData({ abi: f.prepaid.abi, functionName: "executePaymentFromBatch", args: [p, f.other.account.address] }),
+    ];
+    for (const data of attempts) {
+      const next = await signedPayment(f, { validAfter: p.validAfter, validBefore: p.validBefore });
+      await f.usdc.write.setCallback([f.prepaid.address, data]);
+      await executeBatch(f, [next]);
+      assert.equal(await f.usdc.read.callbackSucceeded(), false);
+    }
+    assert.equal(await f.usdc.read.balanceOf([f.payee.account.address]), 5n * p.amount);
+    assert.equal(await f.prepaid.read.accruedTips(), 1_500_000n);
   });
 });
