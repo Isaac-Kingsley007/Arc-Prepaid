@@ -12,11 +12,17 @@ date/time, and daily, weekly, or monthly intervals. End a schedule after
 dates and exact USDC totals. All dates use your device's local timezone;
 monthly payments keep the original day and adjust for shorter months.
 
-This is a UI preview. The wallet button explains the upcoming integration;
-it does not connect a wallet. Reviewed plans can be saved as unsigned drafts
-for the current page session, reused, or discarded. Refreshing clears drafts.
-There are no signatures, RPC calls, or on-chain payments/cancellations yet.
-Authorization execution windows will be configured during wallet integration.
+The wallet button connects through RainbowKit and wagmi on Arc testnet.
+It shows the connected address, opens account/disconnect controls, and offers
+network switching when the wallet is on another chain. Set your Reown project
+ID in `.env.local` as `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` (see
+`.env.local.example`), then restart `pnpm dev`. Add your app's deployed domain
+to your project's allowed origins in the [Reown dashboard](https://dashboard.reown.com/).
+
+Reviewed plans still save as unsigned drafts for the current page session;
+refreshing clears them. Payment signing and on-chain payments/cancellations
+are the next integration step. Wallet connection does not create a backend
+authentication session.
 
 Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 `pnpm exec tsx --test app/schedule.test.ts`.
