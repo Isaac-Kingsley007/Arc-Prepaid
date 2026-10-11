@@ -1,6 +1,13 @@
-import { encodeAbiParameters, getAddress, keccak256, recoverTypedDataAddress, toHex, zeroAddress, zeroHash, type Address, type Hex } from "viem";
+import { encodeAbiParameters, getAddress, hashDomain, keccak256, recoverTypedDataAddress, toHex, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 
 export const ARC_USDC = "0x3600000000000000000000000000000000000000" as const;
+export function usdcDomainSeparator(chainId: number): Hex {
+  const domain = { name: "USDC", version: "2", chainId: BigInt(chainId), verifyingContract: ARC_USDC };
+  return hashDomain({ domain, types: { EIP712Domain: [
+    { name: "name", type: "string" }, { name: "version", type: "string" },
+    { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" },
+  ] } });
+}
 const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1);
 export const PAYMENT_NONCE_TYPEHASH = keccak256(toHex(
   "PrePaidPayment(uint256 chainId,address prepaid,address usdc,address payer,bytes32 scheduleId,address payee,uint256 amount,uint256 tip,uint256 validAfter,uint256 validBefore,bytes32 salt)",
