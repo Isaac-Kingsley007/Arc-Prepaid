@@ -32,9 +32,9 @@ fails, keep the tab open and use **Retry saving**; the same schedule ID and
 signatures are reused. Unsaved signatures are held only in memory, so
 refreshing loses them. A declined signing request uploads no partial schedule.
 
-Add `PREPAID_CONTRACT_ADDRESS` to `.env.local` using the **current database-based
-contract deployment**. The existing `deployments/arc-testnet.json` predates
-that redesign; do not assume its address supports this flow. Before signing,
+The app defaults to the current contract in `deployments/arc-testnet.json`.
+`PREPAID_CONTRACT_ADDRESS` in `.env.local` overrides that address if needed.
+Before signing,
 the server checks the chain, nonce commitment, token, tip split, decimals and
 USDC domain against the configured deployment. Phase 1 supports Arc testnet.
 Set `APP_ORIGIN` to your app's exact origin (for example,
@@ -42,14 +42,47 @@ Set `APP_ORIGIN` to your app's exact origin (for example,
 Production requires this setting. `ARC_RPC_URL` optionally overrides the
 server RPC. Restart the app after environment changes.
 
+On Windows, if Node cannot verify the RPC certificate but it is trusted by
+the operating system, start the app using the system certificate store
+(supported by the project's Node 22.16 runtime):
+
+```powershell
+$env:NODE_OPTIONS="--use-system-ca"
+pnpm dev
+```
+
+This retains TLS certificate verification.
+
 Wallet connection alone grants no database access: sign-in uses a five-minute
 single-use [SIWE message](https://github.com/wevm/viem/blob/main/src/utils/siwe/createSiweMessage.ts),
 then an eight-hour HttpOnly session with a rotated opaque token. Only its
 hash is stored. APIs enforce matching origins for writes and derive the payer
 from this session. Payment messages use the
 [documented Arc USDC domain](https://docs.arc.io/integrate/relayers-and-paymasters/eip-3009-relayer).
-Cancellation controls and relayer execution are separate phases. Displayed
+Cancellation controls are available in **My payments**. Relayer execution
+remains a separate phase. Displayed
 statuses are database bookkeeping, not a new live receipt indexer.
+
+To cancel, open **My payments**, choose **Cancel remaining payments**, then
+confirm in the dialog and your wallet. The payer submits `cancelSchedule`
+on Arc testnet and pays gas in USDC. Cancellation is permanent and cannot
+undo payments already executed. After confirmation, the server independently
+verifies the receipt, the exact `ScheduleCancellation(payer, scheduleId)`
+event from the configured contract, its block hash and the contract flag.
+Only then does it mirror cancellation into PostgreSQL. Pending/leased
+payments become cancelled; submitted payments remain available for receipt
+reconciliation, and executed history is preserved. No new migration is needed.
+
+If database syncing fails after submission, use **Cancel remaining payments**
+again. The transaction hash is retained in browser storage, scoped to the
+chain, contract, payer and schedule; retrying uses that receipt instead of
+sending another transaction. A replacement transaction's hash is updated.
+If cancelled elsewhere, the server can recover its recent event. For older
+cancellations or a different browser, expand **Already cancelled in another
+app?** and paste the cancellation transaction hash. On-chain cancellation
+blocks future payments even while database syncing is unavailable.
+Receipt confirmation follows [Arc's one-confirmation finality](https://docs.arc.io/integrate/exchanges/deposits).
+Recovery scans at most 9,999 blocks to respect the [Arc RPC log range limit](https://docs.arc.io/arc/references/rpc-endpoints).
 
 Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 `pnpm exec tsx --test app/schedule.test.ts`.
