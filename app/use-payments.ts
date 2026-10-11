@@ -1,11 +1,14 @@
 "use client";
 import { useRef, useState } from "react";
 import { useAccount, useConfig, useSignMessage, useSignTypedData } from "wagmi";
-import { getAccount, getWalletClient } from "wagmi/actions";
+import { getAccount, getWalletClient, waitForTransactionReceipt, writeContract } from "wagmi/actions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { authorizationMessage, attachSignature, preparePayments, type DashboardSchedule, type PaymentUpload } from "../lib/payments";
 import { normalizeAddress, verifyPaymentSignature, type ChainContext } from "../lib/db/authorization";
 import type { ScheduleInput } from "./schedule";
+import { prepaidAbi } from "../lib/prepaid";
+import { bytes32 } from "../lib/db/authorization";
+import type { Hex } from "viem";
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, { method: body === undefined ? "GET" : "POST", cache: "no-store",
@@ -20,6 +23,8 @@ export function usePayments() {
   const [busy, setBusy] = useState(false), [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState<PaymentUpload | null>(null);
+  const [cancellation, setCancellation] = useState<{ payer: string; hash?: Hex; message: string } | null>(null);
+  const cancellationHashes = useRef(new Map<string, Hex>());
   const [pagination, setPagination] = useState<{ payer: string | null; offset: number }>({ payer: null, offset: 0 });
   const lock = useRef(false);
   const payer = address ? normalizeAddress(address) : null;
@@ -59,7 +64,7 @@ export function usePayments() {
     try { await action(address); return true; }
     catch (cause) {
       const message = cause instanceof Error ? cause.message : "Could not finish. Please retry.";
-      setError(/reject|denied/i.test(message) ? "Wallet request declined. No new schedule was saved." : message.split("\n")[0].slice(0, 250));
+      setError(/reject|denied/i.test(message) ? "Wallet request declined. No new transaction or schedule was submitted." : message.split("\n")[0].slice(0, 250));
       return false;
     } finally { lock.current = false; setBusy(false); setProgress(""); }
   }
@@ -71,8 +76,58 @@ export function usePayments() {
     await cache.invalidateQueries({ queryKey: ["schedules"] });
   }
   const retryUpload = pending?.payer === payer ? pending : null;
+  async function cancelSchedule(scheduleId: Hex, providedHash?: string) {
+    return run(async (snapshot) => {
+      await authenticate(snapshot);
+      const context = await api<ChainContext>("/api/payments/config");
+      const storageKey = `prepaid-cancellation:${context.chainId}:${context.prepaid}:${snapshot.toLowerCase()}:${scheduleId}`;
+      const remember = (hash?: Hex) => {
+        if (hash) cancellationHashes.current.set(storageKey, hash); else cancellationHashes.current.delete(storageKey);
+        try { if (hash) localStorage.setItem(storageKey, hash); else localStorage.removeItem(storageKey); } catch { /* In-memory recovery still works when browser storage is unavailable. */ }
+      };
+      let hash = providedHash?.trim() ? bytes32(providedHash.trim()) : cancellationHashes.current.get(storageKey);
+      if (!hash) {
+        try { const stored = localStorage.getItem(storageKey); if (stored) hash = bytes32(stored); } catch { /* Ignore unavailable or malformed local recovery data. */ }
+      }
+      if (!hash) {
+        setProgress("Checking whether this schedule is already cancelled...");
+        const existing = await api<{ cancelled: boolean; transactionHash?: Hex }>("/api/schedules/cancel", { scheduleId });
+        if (existing.cancelled) {
+          setCancellation({ payer: snapshot.toLowerCase(), hash: existing.transactionHash, message: "Cancellation confirmed and synced. Remaining payments are blocked." });
+          await cache.invalidateQueries({ queryKey: ["schedules"] }); return;
+        }
+        await ensureWallet(snapshot);
+        setProgress("Confirm cancellation in your wallet. This transaction uses USDC for gas...");
+        hash = await writeContract(config, { chainId: 5042002, account: snapshot, address: context.prepaid,
+          abi: prepaidAbi, functionName: "cancelSchedule", args: [scheduleId] });
+        remember(hash);
+        setCancellation({ payer: snapshot.toLowerCase(), hash, message: "Cancellation submitted. If confirmation or syncing fails, retry with this transaction." });
+      }
+      setProgress("Waiting for cancellation confirmation...");
+      let replaced = false;
+      const receipt = await waitForTransactionReceipt(config, { chainId: 5042002, hash, confirmations: 1, timeout: 120_000,
+        onReplaced: ({ reason, transactionReceipt }) => {
+          hash = transactionReceipt.transactionHash;
+          replaced = reason !== "repriced";
+          remember(replaced ? undefined : hash);
+          setCancellation({ payer: snapshot.toLowerCase(), hash, message: replaced ? "Your wallet replaced the cancellation transaction. Check it before retrying." : "Waiting to sync the replacement cancellation transaction." });
+        } });
+      if (receipt.status !== "success" || replaced) {
+        remember();
+        throw new Error(replaced ? "Cancellation was replaced by another transaction. Retry to check the schedule and cancel again if needed." : "Cancellation reverted. Your schedule was not cancelled. You can retry.");
+      }
+      hash = receipt.transactionHash; remember(hash);
+      await ensureWallet(snapshot);
+      setProgress("Verifying cancellation and syncing your payments...");
+      await api("/api/schedules/cancel", { scheduleId, transactionHash: hash });
+      remember();
+      setCancellation({ payer: snapshot.toLowerCase(), hash, message: "Cancellation confirmed and synced. Remaining payments are blocked. Payments already executed are unchanged." });
+      await cache.invalidateQueries({ queryKey: ["schedules"] });
+    });
+  }
   return {
     busy, progress, error, authenticated, payer, retryUpload,
+    cancelSchedule, cancellation: cancellation?.payer === payer ? cancellation : null,
     schedules: authenticated && dashboard.data?.payer === payer ? dashboard.data.schedules : [],
     loading: authenticated && dashboard.isPending,
     dashboardError: authenticated ? dashboard.error?.message : session.error?.message,
