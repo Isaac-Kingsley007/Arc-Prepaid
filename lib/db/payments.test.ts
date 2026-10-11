@@ -55,10 +55,10 @@ describe("Postgres.js payment repository (embedded PostgreSQL over TCP)", { conc
   });
 
   it("creates the schema and reapplies migrations without modifying it", async () => {
-    assert.deepEqual(await migrateDatabase(db), ["001_payments.sql"]);
+    assert.deepEqual(await migrateDatabase(db), ["001_payments.sql", "002_wallet_sessions.sql"]);
     assert.deepEqual(await migrateDatabase(db), []);
     const rows = await db`SELECT name FROM prepaid_migrations`;
-    assert.equal(rows.length, 1);
+    assert.equal(rows.length, 2);
   });
 
   it("rejects changed migration history and rolls back invalid migrations", async () => {
@@ -68,11 +68,13 @@ describe("Postgres.js payment repository (embedded PostgreSQL over TCP)", { conc
       await assert.rejects(migrateDatabase(db, directory), /differ from this checkout/);
       const original = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../../db/migrations/001_payments.sql", import.meta.url), "utf8"));
       await writeFile(join(directory, "001_payments.sql"), original);
-      await writeFile(join(directory, "002_invalid.sql"), "CREATE TABLE prepaid_should_rollback(id integer); SELECT missing_column;");
+      const sessions = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../../db/migrations/002_wallet_sessions.sql", import.meta.url), "utf8"));
+      await writeFile(join(directory, "002_wallet_sessions.sql"), sessions);
+      await writeFile(join(directory, "003_invalid.sql"), "CREATE TABLE prepaid_should_rollback(id integer); SELECT missing_column;");
       await assert.rejects(migrateDatabase(db, directory));
       const [row] = await db`SELECT to_regclass('prepaid_should_rollback') AS name`;
       assert.equal(row.name, null);
-      assert.equal((await db`SELECT name FROM prepaid_migrations`).length, 1);
+      assert.equal((await db`SELECT name FROM prepaid_migrations`).length, 2);
     } finally {
       assert.equal(dirname(directory), resolve(tmpdir()));
       assert.ok(directory.startsWith(join(tmpdir(), "prepaid-db-migration-")));
@@ -236,7 +238,7 @@ describe("Postgres.js payment repository (embedded PostgreSQL over TCP)", { conc
       assert.match(migrated.output, /already applied/);
       const checked = await run("db-check");
       assert.equal(checked.status, 0, checked.output);
-      assert.match(checked.output, /all three tables are ready/);
+      assert.match(checked.output, /all four tables are ready/);
       const failed = await run("db-migrate", "https://private-password.invalid");
       assert.equal(failed.status, 1);
       assert.match(failed.output, /migration failed/);
