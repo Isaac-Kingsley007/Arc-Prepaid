@@ -9,7 +9,7 @@
     "lint": "eslint",
     "db:migrate": "tsx --conditions=react-server --env-file=.env.local scripts/db-migrate.ts",
     "db:check": "tsx --conditions=react-server --env-file=.env.local scripts/db-check.ts",
-    "db:test": "tsx --conditions=react-server --test lib/db/*.test.ts",
+    "db:test": "tsx --conditions=react-server --test lib/db/*.test.ts lib/server/*.test.ts",
     "check:receive:testnet": "tsx scripts/check-receive-with-authorization.ts testnet",
     "check:receive:mainnet": "tsx scripts/check-receive-with-authorization.ts mainnet",
     "contracts:build": "pnpm --filter @prepaid/contracts build",
