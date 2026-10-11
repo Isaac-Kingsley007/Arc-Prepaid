@@ -4,13 +4,13 @@
   "status": "deployed",
   "deployer": "0x0bb219a8f27e31a4bf799D5040A56390E394EdBB",
   "usdc": "0x3600000000000000000000000000000000000000",
-  "transactionHash": "0xbbcd443e6fe3b46a37ec726a3d471fa95c43860f3c0edd3b5d8e699e86b664ad",
+  "transactionHash": "0x36149d3f778ea14ceb11257550a9be4c498f68de551a4fb07577f08e79729a6c",
   "compilerVersion": "0.8.30+commit.73712a01",
   "contract": "project/contracts/PrePaid.sol:PrePaid",
   "constructorArguments": "0x0000000000000000000000003600000000000000000000000000000000000000",
-  "contractAddress": "0x2d8e8f15a61f2820e6d493cd144d28fffb9e0d31",
-  "blockNumber": "66291802",
-  "gasUsed": "1980920",
-  "actualGasCostUSDC": "0.0396184",
-  "explorerUrl": "https://explorer.testnet.arc.io/address/0x2d8e8f15a61f2820e6d493cd144d28fffb9e0d31"
+  "contractAddress": "0x60f1389c58b05f2e201d28121738f9b5249e8d00",
+  "blockNumber": "66679581",
+  "gasUsed": "1213413",
+  "actualGasCostUSDC": "0.02426826",
+  "explorerUrl": "https://explorer.testnet.arc.io/address/0x60f1389c58b05f2e201d28121738f9b5249e8d00"
 }
