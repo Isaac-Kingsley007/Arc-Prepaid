@@ -19,10 +19,37 @@ ID in `.env.local` as `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` (see
 `.env.local.example`), then restart `pnpm dev`. Add your app's deployed domain
 to your project's allowed origins in the [Reown dashboard](https://dashboard.reown.com/).
 
-Reviewed plans still save as unsigned drafts for the current page session;
-refreshing clears them. Payment signing and on-chain payments/cancellations
-are the next integration step. Wallet connection does not create a backend
-authentication session.
+Review a plan, then choose **Sign & save**. The wallet first signs a sign-in
+message if needed, followed by one USDC `ReceiveWithAuthorization` per payment.
+Completed signatures are verified and saved together in PostgreSQL. **My
+payments** loads saved schedules for your authenticated wallet, including
+dates, amounts, tips and recorded statuses. It survives refreshes.
+
+Each occurrence opens at its displayed time and expires 24 hours later,
+capped at the next occurrence. EIP-3009 expiry is exclusive. Signing and
+saving send no transaction and require no deposit or approval. If saving
+fails, keep the tab open and use **Retry saving**; the same schedule ID and
+signatures are reused. Unsaved signatures are held only in memory, so
+refreshing loses them. A declined signing request uploads no partial schedule.
+
+Add `PREPAID_CONTRACT_ADDRESS` to `.env.local` using the **current database-based
+contract deployment**. The existing `deployments/arc-testnet.json` predates
+that redesign; do not assume its address supports this flow. Before signing,
+the server checks the chain, nonce commitment, token, tip split, decimals and
+USDC domain against the configured deployment. Phase 1 supports Arc testnet.
+Set `APP_ORIGIN` to your app's exact origin (for example,
+`http://localhost:3000` locally or `https://your-app.example` when hosted).
+Production requires this setting. `ARC_RPC_URL` optionally overrides the
+server RPC. Restart the app after environment changes.
+
+Wallet connection alone grants no database access: sign-in uses a five-minute
+single-use [SIWE message](https://github.com/wevm/viem/blob/main/src/utils/siwe/createSiweMessage.ts),
+then an eight-hour HttpOnly session with a rotated opaque token. Only its
+hash is stored. APIs enforce matching origins for writes and derive the payer
+from this session. Payment messages use the
+[documented Arc USDC domain](https://docs.arc.io/integrate/relayers-and-paymasters/eip-3009-relayer).
+Cancellation controls and relayer execution are separate phases. Displayed
+statuses are database bookkeeping, not a new live receipt indexer.
 
 Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 `pnpm exec tsx --test app/schedule.test.ts`.
@@ -32,8 +59,8 @@ Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 The database uses **Postgres.js** (`postgres`) with parameterized SQL.
 The Node.js app backend and future relayer share `lib/db/`; no ORM or
 separate database package is required. Database functions are server-only.
-The wallet UI, API authentication and transaction broadcasting are separate
-integration steps and have not been connected by this change.
+The app uses server-only API routes to authenticate wallets and save/load
+schedules. Transaction broadcasting remains the relayer's responsibility.
 
 1. Create a Neon project/database (or use your existing one). Choose a region
    close to the app/relayer hosting. Copy the **pooled PostgreSQL connection
@@ -58,9 +85,9 @@ integration steps and have not been connected by this change.
    pnpm db:check
    ```
 
-   Success prints `Database ready. Applied: 001_payments.sql`, then confirms
+   Success prints the newly applied migration filenames, then confirms
    the tables. In Neon SQL Editor you will see `prepaid_schedules`,
-   `prepaid_payments` and the migration history table `prepaid_migrations`.
+   `prepaid_payments`, `prepaid_wallet_sessions` and `prepaid_migrations`.
    The script creates structures but does not seed payments or send chain
    transactions. Run it again safely: applied migrations are skipped.
 4. Run local verification without Neon credentials:
@@ -91,6 +118,11 @@ Future relayer scripts importing this repository also need that condition.
 | `lib/db/authorization.ts` | JSON-safe payment types, instruction validation, nonce generation, EOA signature verification and contract payload conversion. Safe to import for wallet signing; contains no database credentials. |
 | `lib/db/payments.ts` | Server-only shared repository for app backend and relayers. |
 | `db/migrations/001_payments.sql` | Tables, exact integer/hex constraints, uniqueness and discovery indexes. |
+| `db/migrations/002_wallet_sessions.sql` | Wallet sign-in challenges and hashed session tokens. Run `pnpm db:migrate` again for an existing database. |
+| `app/api/auth/route.ts` | Wallet challenge, verification, session lookup and logout. |
+| `app/api/schedules/route.ts` | Authenticated, validated schedule uploads and paginated dashboard reads. |
+| `app/api/payments/config/route.ts` | Read-only chain, deployed contract and USDC domain verification. |
+| `lib/payments.ts` / `app/use-payments.ts` | Browser authorization preparation, wallet signing and upload retry. |
 | `lib/db/migrate.ts` | Checksummed, transactional migration runner with a transaction-scoped advisory lock. |
 | `scripts/db-migrate.ts` / `scripts/db-check.ts` | Table creation and connection/schema checks. |
 | `lib/db/payments.test.ts` | PostgreSQL integration tests without a hosted database. |
@@ -152,8 +184,9 @@ contract. Only standard EOA `v/r/s` signatures are supported by this layer.
 #### App and relayer integration boundaries
 
 These are trusted repository methods, not public API endpoints.
-The future app backend must authenticate the wallet for account-specific
-reads and metadata writes, validate incoming JSON, and enforce rate limits.
+The app backend authenticates the wallet for account-specific reads and
+labels, validates bounded JSON bodies, and verifies signed instructions.
+Apply deployment-level request limits to the public APIs before public launch.
 Signature verification protects the signed payment instructions; it does
 not authenticate an HTTP session or make unsigned labels authoritative.
 Never let a browser submit arbitrary “executed” or “cancelled” status updates.
@@ -310,7 +343,7 @@ through OpenZeppelin's two-step flow. Token checks use `decimals()` and
 
 There is no on-chain schedule registration, payment array, signature storage,
 payment counter, or duplicate execution flag. The database schema and shared
-queries are implemented; wallet UI and cron integration remain the next steps.
+queries and wallet signing UI are implemented; cron integration remains a next step.
 Submitted payment details and signatures are public transaction calldata;
 moving them out of contract storage does not make executed signatures private.
 
