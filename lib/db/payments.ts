@@ -131,6 +131,38 @@ export function createPaymentRepository(db: Database = getDatabase()) {
       return rows.map(paymentRecord);
     },
 
+    async getPaymentByNonce(contextInput: ChainContext, payerInput: Address, nonceInput: Hex): Promise<PaymentRecord | null> {
+      const context = normalizeContext(contextInput), payer = normalizeAddress(payerInput), nonce = bytes32(nonceInput);
+      const [row] = await db<PaymentRow[]>`SELECT p.*, ${contextColumns} FROM prepaid_payments p
+        JOIN prepaid_schedules s ON s.id = p.schedule_pk WHERE ${contextFilter(context)} AND s.payer = ${payer} AND p.nonce = ${nonce}`;
+      return row ? paymentRecord(row) : null;
+    },
+
+    async getRelayerClaim(contextInput: ChainContext, tokenInput: string, executorInput: Address): Promise<PaymentRecord[]> {
+      const context = normalizeContext(contextInput), token = uuid(tokenInput), executor = normalizeAddress(executorInput);
+      const rows = await db<PaymentRow[]>`SELECT p.*, ${contextColumns} FROM prepaid_payments p
+        JOIN prepaid_schedules s ON s.id = p.schedule_pk WHERE ${contextFilter(context)} AND p.claim_token = ${token}
+        AND p.worker_id = ${`user:${executor}`} ORDER BY p.valid_before, p.valid_after, p.id`;
+      return rows.map(paymentRecord);
+    },
+
+    async releaseClaimPayments(tokenInput: string, ids: string[], message: string): Promise<void> {
+      const token = uuid(tokenInput);
+      if (!ids.length) return;
+      bounded(ids.length, 50, "Claim size"); ids.forEach(uuid);
+      await db`UPDATE prepaid_payments SET status = 'pending', claim_token = NULL, worker_id = NULL,
+        lease_until = NULL, last_error = ${safeError(message)}, retry_after = now() + interval '30 seconds', updated_at = now()
+        WHERE claim_token = ${token} AND id IN ${db(ids)} AND status = 'leased'`;
+    },
+
+    /** Caller must verify same-sender/same-nonce replacement transactions on-chain first. */
+    async replaceSubmission(contextInput: ChainContext, oldHashInput: Hex, newHashInput: Hex, executorInput: Address) {
+      const context = normalizeContext(contextInput), oldHash = bytes32(oldHashInput), newHash = bytes32(newHashInput), executor = normalizeAddress(executorInput);
+      await db`UPDATE prepaid_payments p SET transaction_hash = ${newHash}, updated_at = now()
+        FROM prepaid_schedules s WHERE p.schedule_pk = s.id AND ${contextFilter(context)} AND p.status = 'submitted'
+        AND p.transaction_hash = ${oldHash} AND p.executor = ${executor}`;
+    },
+
     /** Read-only discovery for a relayer page. The timestamp must come from the latest chain block. */
     async listDuePayments(contextInput: ChainContext, chainTimestamp: string, limit = 50): Promise<PaymentRecord[]> {
       const context = normalizeContext(contextInput), timestamp = uint256(chainTimestamp);
@@ -195,6 +227,12 @@ export function createPaymentRepository(db: Database = getDatabase()) {
         JOIN prepaid_schedules s ON s.id = p.schedule_pk WHERE ${contextFilter(context)} AND p.status = 'submitted'
         ORDER BY p.updated_at, p.id LIMIT ${limit}`;
       return rows.map(paymentRecord);
+    },
+
+    async touchSubmittedHash(contextInput: ChainContext, hashInput: Hex) {
+      const context = normalizeContext(contextInput), hash = bytes32(hashInput);
+      await db`UPDATE prepaid_payments p SET updated_at = now() FROM prepaid_schedules s
+        WHERE p.schedule_pk = s.id AND ${contextFilter(context)} AND p.status = 'submitted' AND p.transaction_hash = ${hash}`;
     },
 
     /** Trusted confirmed PaymentExecuted event only; supersedes stale DB cancellation/expiry flags. */
