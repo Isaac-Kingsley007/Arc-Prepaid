@@ -87,6 +87,54 @@ Recovery scans at most 9,999 blocks to respect the [Arc RPC log range limit](htt
 Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 `pnpm exec tsx --test app/schedule.test.ts`.
 
+### User relayer
+
+Open `/relayer`, or choose **Become a relayer** in the workspace navigation.
+Connect an EOA wallet on Arc testnet and sign in. The page lists up to 50
+currently due candidates without exposing signatures, private labels or
+schedule metadata. It checks the latest chain timestamp, cancellation,
+USDC authorization state, signatures and payer balances. Refreshing also
+reconciles a bounded set of submitted receipts; polling runs every 30 seconds.
+
+Choose a batch size from 1–10 and click **Prepare batch**. The backend claims
+payments for ten minutes, filters payments that cannot execute, simulates
+the whole batch and estimates gas. It displays your expected 70% tip share
+and a maximum fee budget before you choose **Confirm & execute**. Wallet
+confirmation submits `executePayments` directly from your wallet, which
+receives the relayer tips. **Release batch** gives back an unsubmitted batch.
+Preparing a batch sends no transaction. Insufficient gas funds or a failed
+simulation release the claim automatically.
+
+USDC payment/tip values use six decimals; native gas estimates retain all
+18 decimals. A payer's combined payments must fit their available balance.
+If the relayer also pays a scheduled payment, its balance must cover both
+that payment and gas. Actual earnings come from verified `PaymentExecuted`
+events; each `PaymentFailed` is handled separately. A failed item earns no
+tip. Gas can exceed tips, and eligibility can change after simulation.
+
+After submission, keep the transaction hash. Browser storage retains it
+across reloads, and **Sync transaction** checks its receipt without sending
+another transaction. **Sync an existing relayer transaction** supports a
+hash from the same wallet. The server verifies the actual transaction
+destination, sender, exact signed calldata, receipt block and per-payment
+events before updating the database. Unknown RPC outcomes keep submitted
+work reserved. Verified replacements update the hash; a confirmed wallet
+cancellation/replacement safely releases the original failed batch.
+
+Claims reduce duplicate submissions; the contract and USDC remain the
+authority. Anyone who already holds a signature can still execute it, and
+wallet broadcasting happens before its hash can be stored on the server.
+If a wallet prompt exceeds the reservation or the tab closes during broadcast,
+keep/check the wallet's transaction hash and sync it rather than resubmitting.
+Prepared batches lost before submission become available after ten minutes.
+Used/revoked authorizations with no recent execution evidence are marked
+unavailable, not fabricated as executed; older execution history requires
+its receipt to be synced. Cron scheduling remains a separate implementation.
+
+The new flow uses `app/relayer/page.tsx`, `hooks/use-relayer.ts`,
+`app/api/relayer/route.ts` and shared server-only `lib/relayer/service.ts`.
+It reuses the current schema; no dependency installation or migration is needed.
+
 ### Neon PostgreSQL setup
 
 The database uses **Postgres.js** (`postgres`) with parameterized SQL.
