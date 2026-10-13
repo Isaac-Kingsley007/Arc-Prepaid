@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "relayer:check": "tsx --conditions=react-server scripts/relayer.ts --dry-run",
+    "relayer:run": "tsx --conditions=react-server scripts/relayer.ts --execute",
     "db:migrate": "tsx --conditions=react-server --env-file=.env.local scripts/db-migrate.ts",
     "db:check": "tsx --conditions=react-server --env-file=.env.local scripts/db-check.ts",
     "db:test": "tsx --conditions=react-server --test lib/db/*.test.ts lib/server/*.test.ts",
