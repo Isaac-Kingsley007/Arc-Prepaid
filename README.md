@@ -87,6 +87,87 @@ Recovery scans at most 9,999 blocks to respect the [Arc RPC log range limit](htt
 Check the UI with `pnpm lint`, `pnpm exec tsc --noEmit`, and
 `pnpm exec tsx --test app/schedule.test.ts`.
 
+### GitHub cron relayer
+
+The cron runner is `scripts/relayer.ts`, using the shared relayer checks and
+receipt reconciliation. `.github/workflows/relayer.yml` runs at **minute 17
+of every hour (UTC)** and supports manual dry runs. It targets the current
+Arc testnet deployment. It checks up to 50 due candidates and sends at most
+three batches of five payments per run by default. User and cron relayers
+coordinate through the same payment claims.
+
+The runner allows the small gas loss requested for payment delivery: at most
+**0.02 USDC estimated loss per batch**, with a **0.10 USDC maximum gas budget
+per transaction**. These are configurable. Loss is an estimate based on
+expected tips; payments can fail or be executed by someone else before the
+transaction lands, so actual tips may be lower. The signed gas limit and fee
+cap bound the transaction's gas spend. Set `RELAYER_ALLOW_UNPROFITABLE=false`
+to require tips to cover gas plus `RELAYER_MIN_PROFIT_USDC` instead.
+
+`003_relayer_transactions.sql` adds a durable signed-transaction journal.
+The signed bytes, hash and nonce are saved **atomically with marking the
+payments submitted, before broadcasting**. After a crash or timeout, the
+next run rebroadcasts the identical transaction and reconciles its receipt.
+It does not create another transaction while its wallet has unresolved
+journal entries. Signed bytes and private keys are never printed in logs.
+The database journal contains executable authorizations; keep it server-only.
+
+**Setup:**
+
+1. Run `pnpm db:migrate` and `pnpm db:check` using the app's configured Neon
+   database. This adds the journal without modifying existing payment data.
+2. Use a **dedicated funded testnet EOA** for the cron runner. Its wallet pays
+   gas and receives the 70% tip share. Keep it separate from the contract
+   owner and user relayer wallets so another app cannot consume its nonce.
+3. In GitHub **Settings → Secrets and variables → Actions**, add repository
+   secrets `DATABASE_URL` (the same Neon pooled URL as the app) and
+   `RELAYER_PRIVATE_KEY` (0x-prefixed dedicated wallet key). Optionally add
+   secret `ARC_RPC_URL` for a private provider endpoint.
+4. Add repository variable `RELAYER_ADDRESS` with that wallet's public
+   address. `PREPAID_CONTRACT_ADDRESS` optionally overrides the deployment
+   record. The remaining settings in `.env.relayer.example` are optional
+   repository variables; the workflow supplies their documented defaults.
+5. Commit/push this workflow and its code to the **default branch**. In
+   **Actions → Arc testnet cron relayer → Run workflow**, leave **dry_run**
+   checked for the first run. It reads chain/database state but does not
+   claim payments, change their statuses, sign or broadcast a transaction.
+6. Set repository variable **`CRON_RELAYER_ENABLED=true`** to activate scheduled
+   execution. You can then run manually with **dry_run** unchecked. Setting
+   the variable to `false` stops future execution runs; it does not undo any
+   transaction already stored or broadcast. Re-enable to recover pending work.
+
+The workflow grants only `contents: read`, uses pinned official actions,
+exposes secrets only to the run step, and serializes runs without cancelling
+an in-flight relayer. Execution is restricted to the default branch.
+GitHub schedules can be delayed or dropped, and public repositories disable
+schedules after 60 days without activity; this is polling rather than an
+exact-time delivery guarantee. See [GitHub's scheduling documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
+**Local runs:** copy `.env.relayer.example` to `.env.relayer`, fill in the
+Neon URL and dedicated public address, and run:
+
+```powershell
+node --use-system-ca --conditions=react-server --env-file=.env.relayer --import tsx scripts/relayer.ts --dry-run
+```
+
+The key is optional for a dry run. To execute, add the private key locally
+and replace `--dry-run` with `--execute`. For environments such as GitHub
+that inject variables, use `pnpm relayer:check` or `pnpm relayer:run`.
+Neither command loads a local env file automatically. `.env.relayer` is ignored
+by Git; only the blank example is committed.
+
+If someone externally replaces a journaled transaction, the runner stops
+rather than guess what happened. Resolve a **confirmed same-wallet/same-nonce
+replacement** with:
+
+```powershell
+node --use-system-ca --conditions=react-server --env-file=.env.relayer --import tsx scripts/relayer.ts --recover ORIGINAL_HASH REPLACEMENT_HASH
+```
+
+This verifies chain evidence, syncs the payment results and resolves the old
+journal entry without broadcasting another transaction. A private key is not
+required for receipt recovery when `RELAYER_ADDRESS` is set.
+
 ### User relayer
 
 Open `/relayer`, or choose **Become a relayer** in the workspace navigation.
@@ -129,7 +210,7 @@ keep/check the wallet's transaction hash and sync it rather than resubmitting.
 Prepared batches lost before submission become available after ten minutes.
 Used/revoked authorizations with no recent execution evidence are marked
 unavailable, not fabricated as executed; older execution history requires
-its receipt to be synced. Cron scheduling remains a separate implementation.
+its receipt to be synced. Cron scheduling uses the GitHub workflow described above.
 
 The new flow uses `app/relayer/page.tsx`, `hooks/use-relayer.ts`,
 `app/api/relayer/route.ts` and shared server-only `lib/relayer/service.ts`.
