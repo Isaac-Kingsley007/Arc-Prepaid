@@ -9,6 +9,9 @@ import { configuredAddress, cronConfig } from "../lib/relayer/cron-config";
 import { createTransactionJournal } from "../lib/relayer/journal";
 import { runCron } from "../lib/relayer/cron";
 import { settleReplacement } from "../lib/relayer/service";
+import { relayerDiagnostic } from "../lib/relayer/errors";
+
+let stage = "configuration validation";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -21,7 +24,11 @@ async function main() {
   if (!dryRun && !account) throw new Error("Set RELAYER_PRIVATE_KEY for execution");
   const executor = normalizeAddress(account?.address ?? configuredAddress(process.env.RELAYER_ADDRESS));
   if (account && process.env.RELAYER_ADDRESS && normalizeAddress(process.env.RELAYER_ADDRESS) !== executor) throw new Error("Relayer address does not match the private key");
-  const context = await checkedContext(), client = arcClient(), db = getDatabase();
+  stage = "Arc RPC and contract verification";
+  const context = await checkedContext(), client = arcClient();
+  stage = "database connection";
+  const db = getDatabase();
+  await db`SELECT 1`;
   if (recovery) {
     const journal = createTransactionJournal(db), original = bytes32(args[1]), replacement = bytes32(args[2]);
     const saved = (await journal.pending(context, executor)).find((tx) => tx.hash === original);
@@ -35,6 +42,7 @@ async function main() {
     rpcUrls: { default: { http: [process.env.ARC_RPC_URL || "https://rpc.testnet.arc.io"] } } });
   const wallet = createWalletClient({ account, chain, transport: http(chain.rpcUrls.default.http[0], { retryCount: 1, timeout: 15_000 }) });
   console.log(`${dryRun ? "Dry run" : "Execution"}: Arc testnet, relayer ${executor}, contract ${context.prepaid}.`);
+  stage = dryRun ? "due-payment discovery and chain checks" : "batch execution and receipt recovery";
   await runCron({ context, executor, client, repo: createPaymentRepository(db), journal: createTransactionJournal(db), config, dryRun,
     sign: async (batch) => {
       const data = encodeFunctionData({ abi: prepaidAbi, functionName: "executePayments",
@@ -46,8 +54,8 @@ async function main() {
     broadcast: (serializedTransaction) => wallet.sendRawTransaction({ serializedTransaction }), log: (message) => console.log(message),
   });
 }
-main().catch(() => {
+main().catch((error) => {
   // Driver/RPC errors may contain URLs, SQL or raw signed transactions. Never log them.
-  console.error("Relayer stopped. Check configuration, database migrations, wallet funding and pending transaction receipts. No secrets or signed transaction bytes were printed.");
+  console.error(`Relayer stopped: ${relayerDiagnostic(error, stage)}`);
   process.exitCode = 1;
 }).finally(closeDatabase);

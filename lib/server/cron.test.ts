@@ -15,6 +15,7 @@ import { createTransactionJournal } from "../relayer/journal";
 import { allowedBatch, cronConfig } from "../relayer/cron-config";
 import { recoverTransaction, runCron } from "../relayer/cron";
 import type { RelayerBatch } from "../relayer/types";
+import { relayerDiagnostic } from "../relayer/errors";
 
 // Public development fixtures. No live wallet key or hosted database is used.
 const payer = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
@@ -22,6 +23,11 @@ const signer = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae8
 const executor = normalizeAddress(signer.address), context = { chainId: 5042002, prepaid: "0x1111111111111111111111111111111111111111", usdc: ARC_USDC } as const;
 const blockHash = keccak256(toHex("block"));
 describe("cron signed transaction journal and recovery", { concurrency: false }, () => {
+  it("reports configuration failures without exposing arbitrary error text", () => {
+    assert.match(relayerDiagnostic(new Error("Invalid RELAYER_PRIVATE_KEY"), "configuration validation"), /66 characters/);
+    assert.ok(!relayerDiagnostic(new Error("postgresql://SECRET credentials and signed bytes"), "database connection").includes("SECRET"));
+    assert.match(relayerDiagnostic({ cause: { code: "42P01" } }, "discovery"), /migration/);
+  });
   let pg: PGlite, socket: PGLiteSocketServer, db: Database, repo: ReturnType<typeof createPaymentRepository>, journal: ReturnType<typeof createTransactionJournal>;
   before(async () => { pg = await PGlite.create(); socket = new PGLiteSocketServer({ db: pg, host: "127.0.0.1", port: 0 }); await socket.start();
     db = createDatabase(`postgresql://postgres:postgres@${socket.getServerConn()}/postgres`, 1); await migrateDatabase(db); repo = createPaymentRepository(db); journal = createTransactionJournal(db); });
