@@ -38,6 +38,7 @@ yarn-error.log*
 .env*
 !.env.testnet.example
 !.env.local.example
+!.env.relayer.example
 /deployments/arc-testnet-input.json
 
 # vercel
