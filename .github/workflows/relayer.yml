@@ -1,0 +1,59 @@
+name: Arc testnet cron relayer
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check due payments without signing, broadcasting or changing payment state
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arc-testnet-cron-relayer
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    # Run trusted default-branch code only. Enable execution explicitly after setting secrets.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (vars.CRON_RELAYER_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.dry_run))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          version: 12.9.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run relayer
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_POOL_MAX: '2'
+          RELAYER_PRIVATE_KEY: ${{ secrets.RELAYER_PRIVATE_KEY }}
+          RELAYER_ADDRESS: ${{ vars.RELAYER_ADDRESS }}
+          ARC_RPC_URL: ${{ secrets.ARC_RPC_URL || 'https://rpc.testnet.arc.io' }}
+          PREPAID_CONTRACT_ADDRESS: ${{ vars.PREPAID_CONTRACT_ADDRESS }}
+          RELAYER_BATCH_SIZE: ${{ vars.RELAYER_BATCH_SIZE || '5' }}
+          RELAYER_MAX_BATCHES: ${{ vars.RELAYER_MAX_BATCHES || '3' }}
+          RELAYER_MAX_GAS_COST_USDC: ${{ vars.RELAYER_MAX_GAS_COST_USDC || '0.10' }}
+          RELAYER_ALLOW_UNPROFITABLE: ${{ vars.RELAYER_ALLOW_UNPROFITABLE || 'true' }}
+          RELAYER_MAX_LOSS_USDC: ${{ vars.RELAYER_MAX_LOSS_USDC || '0.02' }}
+          RELAYER_MIN_PROFIT_USDC: ${{ vars.RELAYER_MIN_PROFIT_USDC || '0' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          if [[ "$DRY_RUN" == "true" ]]; then
+            pnpm relayer:check
+          else
+            pnpm relayer:run
+          fi
