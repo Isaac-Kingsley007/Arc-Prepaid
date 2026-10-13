@@ -13,7 +13,12 @@ export default function PaymentDashboard({ payments }: { payments: ReturnType<ty
       <div><h2 className="text-[15px] font-semibold">My payments</h2><p className="mt-1 text-xs text-[#73677f]">Signed schedules saved for your connected wallet.</p></div>
       {payments.authenticated && <button className="rounded-lg px-3 py-2 text-xs text-primary hover:bg-[#f5f3fc]" onClick={() => void payments.refresh()}>Refresh</button>}
     </div>
-    {!payments.authenticated ? <div className="px-5 py-16 text-center"><p className="mb-5 text-sm text-[#73677f]">{payments.payer ? "Sign in to see your saved payments." : "Connect your wallet to see your payments."}</p><button disabled={payments.busy || !payments.payer} className="rounded-lg bg-primary px-5 py-3 text-xs text-white disabled:opacity-50" onClick={() => void payments.signIn()}>Sign in with wallet</button></div>
+    {!payments.authenticated ? <div className="px-5 py-16 text-center">
+      <h3 className="text-base font-semibold">{payments.payer ? "Wallet connected. One more step." : "Connect your wallet to get started."}</h3>
+      <p id="payment-sign-in-help" className="mx-auto mt-3 max-w-md text-sm leading-6 text-[#73677f]">{payments.payer ? "To view your saved payments, click below and sign a message in your wallet to confirm it belongs to you." : "Use Connect wallet at the top of the page. Then confirm ownership with a sign-in message to view your saved payments."}</p>
+      <p className="mb-5 mt-2 text-xs leading-5 text-[#73677f]">Signing in is free and does not authorize a payment or move funds.</p>
+      <button disabled={payments.busy || !payments.payer} aria-describedby="payment-sign-in-help" className="rounded-lg bg-primary px-5 py-3 text-xs text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:opacity-50" onClick={() => void payments.signIn()}>{payments.busy ? "Check your wallet..." : "Sign message to view payments"}</button>
+    </div>
       : payments.loading ? <p className="p-7 text-sm text-[#73677f]">Loading your payments…</p>
       : !payments.schedules.length && !payments.dashboardError ? <p className="px-5 py-16 text-center text-sm text-[#73677f]">Your signed payments will appear here.</p> : null}
     {payments.dashboardError && <div className="p-7 text-sm text-red-700"><p role="alert">{payments.dashboardError}</p><button disabled={payments.busy || !payments.payer} className="mt-3 text-xs text-primary underline" onClick={() => void payments.signIn()}>Sign in and retry</button></div>}
