@@ -8,6 +8,8 @@ PrePaid lets you plan payments in advance while keeping your USDC in your wallet
 
 Built for [Arc Microgrants](https://dorahacks.io/hackathon/arc-microgrants/detail).
 
+**Project docs:** [Read the user guides](docs/README.md) for payments, cancellation, relaying and how PrePaid works.
+
 ## The problem
 
 Stablecoin payments on-chain are **push-only**: money moves only when the payer sends it.
@@ -30,6 +32,58 @@ Think of post-dated cheques. Each payment is made out to one payee, for one amou
 5. **Cancel when needed.** One payer transaction permanently cancels every remaining payment in a schedule. Completed payments stay completed.
 
 For a **10 USDC payment with a 1 USDC tip**, the recipient receives 10, the relayer receives 0.70, and the platform retains 0.30. Relayer gas is separate.
+
+### Architecture
+
+```text
++--------------------------------------------------------------------------------------------+
+|  OFF-CHAIN  |  Sign, store and discover payments                                           |
+|                                                                                            |
+|                       Signatures                            Save                           |
+|  +------------------+             +----------------------+          +------------------+   |
+|  |   Payer wallet   |             |  Next.js app / API   |          | Neon PostgreSQL  |   |
+|  |  Sign payments   |------------>|  Verify signatures   |--------->| Signed payments  |   |
+|  | USDC stays here  |             |    Save schedules    |          |  Schedule data   |   |
+|  +------------------+             +----------------------+          +------------------+   |
+|           |                                                                   |            |
+|           |                                      Find due authorizations      |            |
+|           |                                   +-------------------------------+            |
+|           |                                   v                               v            |
+|           |                       +----------------------+          +------------------+   |
+|           |                       |     User relayer     |          |   Cron relayer   |   |
+|           |                       |   Connected wallet   |          |  GitHub Actions  |   |
+|           |                       |  Reviews gas + tips  |          | Scheduled runner |   |
+|           |                       +----------------------+          +------------------+   |
+|           |                                   |                               |            |
+|  cancelSchedule                               |                               |            |
+|           |                                   +-------------------------------+            |
+|           |                                   |                                            |
++-----------+-----------------------------------+--------------------------------------------+
+            |                                   |  Submit batch + pay USDC gas
+            |                                   |
++-----------+-----------------------------------+--------------------------------------------+
+|           |    ON-CHAIN / ARC MAINNET         |                                            |
+|           |                                   v            receiveWithAuthorization        |
+|           |                       +----------------------+          +------------------+   |
+|           |                       |   PrePaid contract   |--------->|     Arc USDC     |   |
+|           +---------------------->| Check window + cancel|          | Verify signature |   |
+|                                   | Route payment + tip  |<---------|  Consume nonce   |   |
+|                                   +----------------------+          +------------------+   |
+|                                               |                                            |
+|                                               |               Amount + tip                 |
+|                                               |                                            |
+|      Payment amount                  70% of tip                    Remaining tip           |
+|              +--------------------------------+-------------------------------+            |
+|              |                                |                               |            |
+|              v                                v                               v            |
+|  +----------------------+         +----------------------+         +--------------------+  |
+|  |     Payee wallet     |         |    Relayer wallet    |         |   Platform tips    |  |
+|  |   Receives payment   |         |  Receives tip share  |         |  Kept in PrePaid   |  |
+|  +----------------------+         +----------------------+         +--------------------+  |
++--------------------------------------------------------------------------------------------+
+```
+
+Signing stores authorizations, not funds. The relayer submits them to PrePaid; settlement happens in one transaction. Cancellation is a separate payer transaction.
 
 ### What makes the authorization safe?
 
