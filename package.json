@@ -18,7 +18,9 @@
     "contracts:test": "pnpm --filter @prepaid/contracts test",
     "contracts:typecheck": "pnpm --filter @prepaid/contracts typecheck",
     "contracts:check:testnet": "pnpm contracts:build && tsx --env-file=.env.testnet scripts/deploy-testnet.mts --check",
-    "contracts:deploy:testnet": "pnpm contracts:build && tsx --env-file=.env.testnet scripts/deploy-testnet.mts --deploy"
+    "contracts:deploy:testnet": "pnpm contracts:build && tsx --env-file=.env.testnet scripts/deploy-testnet.mts --deploy",
+    "contracts:check:mainnet": "pnpm contracts:build && tsx --env-file=.env.mainnet scripts/deploy-mainnet.mts --check",
+    "contracts:deploy:mainnet": "pnpm contracts:build && tsx --env-file=.env.mainnet scripts/deploy-mainnet.mts --deploy"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.11",
