@@ -10,9 +10,16 @@ Built for [Arc Microgrants](https://dorahacks.io/hackathon/arc-microgrants/detai
 
 ## The problem
 
+Stablecoin payments on-chain are **push-only**: money moves only when the payer sends it.
 Rent, allowances, subscriptions and regular payouts repeat. Sending each payment manually means remembering every due date. Other approaches require a standing spending allowance or money deposited into a contract ahead of time.
 
 PrePaid offers a way to authorize specific future payments without granting open-ended spending permission or locking up the whole schedule's funds.
+
+## Our Solution
+
+**PrePaid lets you sign a whole payment schedule once, with no standing approval and no deposit. Your USDC stays in your wallet until each payment actually executes.**
+
+Think of post-dated cheques. Each payment is made out to one payee, for one amount, valid only inside its own time window.
 
 ## How it works
 
@@ -51,6 +58,8 @@ PrePaid uses Arc for payment execution, schedule cancellation, relayer compensat
 Both payment transactions have successful receipts and emit `PaymentExecuted` from this contract. The public [deployment record](deployments/arc-mainnet.json) includes its address, deployment hash, compiler version and constructor arguments. Contract source: [PrePaid.sol](packages/contracts/contracts/PrePaid.sol).
 
 ## Try it
+
+Read the [User documentation](docs/README.md) for payment, cancellation and relayer guides.
 
 1. Open the [app](https://arc-prepaid.vercel.app/) and connect an EOA wallet on Arc Mainnet.
 2. Enter a payment schedule, review the dates and totals, then choose **Sign & save**. Confirm the sign-in message if requested, followed by each payment authorization.
