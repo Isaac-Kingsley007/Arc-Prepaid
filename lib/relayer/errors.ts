@@ -1,6 +1,7 @@
 /** Only fixed, approved diagnostics are printed; arbitrary error messages may contain secrets. */
 export function relayerDiagnostic(error: unknown, stage: string): string {
   const known = new Set([
+    "NEXT_PUBLIC_ARC_NETWORK must be mainnet or testnet",
     "Invalid RELAYER_PRIVATE_KEY", "Set RELAYER_PRIVATE_KEY for execution",
     "Set RELAYER_ADDRESS for a dry run without a private key", "Relayer address does not match the private key",
     "Use --dry-run, --execute, or --recover ORIGINAL_HASH REPLACEMENT_HASH", "Gas budget must be above zero",

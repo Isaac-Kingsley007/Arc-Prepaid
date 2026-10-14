@@ -1,4 +1,4 @@
-name: Arc testnet cron relayer
+name: Arc cron relayer
 
 on:
   schedule:
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: arc-testnet-cron-relayer
+  group: arc-cron-relayer
   cancel-in-progress: false
 
 jobs:
@@ -38,11 +38,12 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run relayer
         env:
+          NEXT_PUBLIC_ARC_NETWORK: ${{ vars.NEXT_PUBLIC_ARC_NETWORK || 'mainnet' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_POOL_MAX: '2'
           RELAYER_PRIVATE_KEY: ${{ secrets.RELAYER_PRIVATE_KEY }}
           RELAYER_ADDRESS: ${{ vars.RELAYER_ADDRESS }}
-          ARC_RPC_URL: ${{ secrets.ARC_RPC_URL || 'https://rpc.testnet.arc.io' }}
+          ARC_RPC_URL: ${{ secrets.ARC_RPC_URL || vars.ARC_RPC_URL }}
           PREPAID_CONTRACT_ADDRESS: ${{ vars.PREPAID_CONTRACT_ADDRESS }}
           RELAYER_BATCH_SIZE: ${{ vars.RELAYER_BATCH_SIZE || '5' }}
           RELAYER_MAX_BATCHES: ${{ vars.RELAYER_MAX_BATCHES || '3' }}

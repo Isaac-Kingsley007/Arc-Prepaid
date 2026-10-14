@@ -3,16 +3,17 @@ import { createPublicClient, http, parseAbi } from "viem";
 import { ARC_USDC, normalizeContext, PAYMENT_NONCE_TYPEHASH, usdcDomainSeparator } from "../db/authorization";
 import { ApiError } from "./http";
 import { prepaidAbi } from "../prepaid";
+import { arcChain } from "../network";
 import deployment from "../../deployments/arc-testnet.json";
 
 export function paymentContext() {
-  const prepaid = process.env.PREPAID_CONTRACT_ADDRESS || deployment.contractAddress;
+  const prepaid = process.env.PREPAID_CONTRACT_ADDRESS || (arcChain.testnet ? deployment.contractAddress : undefined);
   if (!prepaid) throw new ApiError("Set PREPAID_CONTRACT_ADDRESS to the current PrePaid deployment.", 503);
-  try { return normalizeContext({ chainId: 5042002, prepaid: prepaid as `0x${string}`, usdc: ARC_USDC }); }
+  try { return normalizeContext({ chainId: arcChain.id, prepaid: prepaid as `0x${string}`, usdc: ARC_USDC }); }
   catch { throw new ApiError("Invalid PREPAID_CONTRACT_ADDRESS.", 503); }
 }
 export function arcClient() {
-  return createPublicClient({ transport: http(process.env.ARC_RPC_URL || "https://rpc.testnet.arc.io", { timeout: 15_000, retryCount: 1 }) });
+  return createPublicClient({ transport: http(process.env.ARC_RPC_URL || arcChain.rpcUrls.default.http[0], { timeout: 15_000, retryCount: 1 }) });
 }
 const usdcAbi = parseAbi(["function DOMAIN_SEPARATOR() view returns (bytes32)", "function decimals() view returns (uint8)"]);
 export async function checkedContext() {
@@ -28,7 +29,7 @@ export async function checkedContext() {
   if (chainId !== context.chainId || typehash !== PAYMENT_NONCE_TYPEHASH || token.toLowerCase() !== context.usdc
     || percent !== BigInt(70) || decimals !== 6
     || domain !== usdcDomainSeparator(chainId)) {
-    throw new ApiError("The configured contract or USDC signing domain is incompatible. Use the current PrePaid deployment on Arc testnet.", 503);
+    throw new ApiError("The configured contract or USDC signing domain is incompatible. Use the current PrePaid deployment on the selected Arc network.", 503);
   }
   return context;
 }

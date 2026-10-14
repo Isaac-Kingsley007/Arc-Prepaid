@@ -1,4 +1,5 @@
 "use client";
+import { arcChain } from "@/lib/network";
 import { useRef, useState } from "react";
 import { useAccount, useConfig, useSignMessage } from "wagmi";
 import { getAccount, getWalletClient, waitForTransactionReceipt, writeContract } from "wagmi/actions";
@@ -35,7 +36,7 @@ export function useRelayer() {
     queryFn: () => api<{ context: ChainContext; candidates: RelayerCandidate[] }>(), refetchInterval: 30_000 });
   const saved = useQuery({ queryKey: ["relayer-recovery", payer], enabled: Boolean(payer),
     queryFn: () => {
-      try { const value = JSON.parse(localStorage.getItem(`prepaid-relayer:${payer}`) || "null");
+      try { const value = JSON.parse(localStorage.getItem(`prepaid-relayer:${arcChain.id}:${payer}`) || "null");
         return value?.payer === payer ? { ...value, transactionHash: bytes32(value.transactionHash) } as Recovery : null;
       } catch { return null; }
     } });
@@ -43,18 +44,18 @@ export function useRelayer() {
   const batch = prepared?.payer === payer ? prepared.batch : null;
   function remember(value: Recovery | null, owner: string) {
     setPending(value);
-    try { if (value) localStorage.setItem(`prepaid-relayer:${owner}`, JSON.stringify(value)); else localStorage.removeItem(`prepaid-relayer:${owner}`); } catch { /* Memory recovery remains available. */ }
+    try { if (value) localStorage.setItem(`prepaid-relayer:${arcChain.id}:${owner}`, JSON.stringify(value)); else localStorage.removeItem(`prepaid-relayer:${arcChain.id}:${owner}`); } catch { /* Memory recovery remains available. */ }
     void cache.invalidateQueries({ queryKey: ["relayer-recovery", owner] });
   }
   async function ensureWallet(snapshot: Hex) {
     if (getAccount(config).address?.toLowerCase() !== snapshot.toLowerCase()) throw new Error("Wallet changed. Switch back to the wallet that prepared this batch.");
     const client = await getWalletClient(config);
     const [accounts, chain] = await Promise.all([client.getAddresses(), client.getChainId()]);
-    if (accounts[0]?.toLowerCase() !== snapshot.toLowerCase() || chain !== 5042002) throw new Error("Use the connected wallet on Arc Testnet.");
+    if (accounts[0]?.toLowerCase() !== snapshot.toLowerCase() || chain !== arcChain.id) throw new Error(`Use the connected wallet on ${arcChain.name}.`);
   }
   async function run(action: (snapshot: Hex) => Promise<void>) {
     if (lock.current) return;
-    if (!address || chainId !== 5042002) { setError("Connect your wallet on Arc Testnet first."); return; }
+    if (!address || chainId !== arcChain.id) { setError(`Connect your wallet on ${arcChain.name} first.`); return; }
     lock.current = true; setBusy(true); setError("");
     try { await ensureWallet(address); await action(address); }
     catch (cause) {
@@ -104,7 +105,7 @@ export function useRelayer() {
       setProgress("Confirm the batch execution and gas fee in your wallet...");
       let hash: Hex;
       try {
-        hash = await writeContract(config, { chainId: 5042002, account: snapshot, address: batch.context.prepaid,
+        hash = await writeContract(config, { chainId: arcChain.id, account: snapshot, address: batch.context.prepaid,
           abi: prepaidAbi, functionName: "executePayments", args: [batch.payments.map((p) => toContractPayment({ ...batch.context, payer: p.payer, scheduleId: p.scheduleId }, p))],
           gas: BigInt(batch.gas), maxFeePerGas: BigInt(batch.maxFeePerGas), maxPriorityFeePerGas: BigInt(batch.maxPriorityFeePerGas) });
       } catch (cause) {
@@ -119,7 +120,7 @@ export function useRelayer() {
       // A browser wallet supplies the hash after broadcasting. Persist it promptly and keep it on errors.
       try { const result = await sync(value); if (!result.pending) return; } catch { /* Receipt recovery still follows. */ }
       setProgress("Waiting for execution confirmation...");
-      await waitForTransactionReceipt(config, { chainId: 5042002, hash, confirmations: 1, timeout: 120_000,
+      await waitForTransactionReceipt(config, { chainId: arcChain.id, hash, confirmations: 1, timeout: 120_000,
         onReplaced: ({ reason, transactionReceipt }) => { value = { ...value, originalHash: reason !== "repriced" ? hash : undefined, transactionHash: transactionReceipt.transactionHash }; remember(value, value.payer); } });
       await ensureWallet(snapshot); setProgress("Syncing each payment result..."); await sync(value);
     }),

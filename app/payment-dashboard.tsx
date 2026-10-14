@@ -1,4 +1,5 @@
 "use client";
+import { arcChain } from "@/lib/network";
 import type { usePayments } from "./use-payments";
 import { formatUSDC } from "./schedule";
 import { useRef, useState } from "react";
@@ -22,7 +23,7 @@ export default function PaymentDashboard({ payments }: { payments: ReturnType<ty
       : payments.loading ? <p className="p-7 text-sm text-[#73677f]">Loading your payments…</p>
       : !payments.schedules.length && !payments.dashboardError ? <p className="px-5 py-16 text-center text-sm text-[#73677f]">Your signed payments will appear here.</p> : null}
     {payments.dashboardError && <div className="p-7 text-sm text-red-700"><p role="alert">{payments.dashboardError}</p><button disabled={payments.busy || !payments.payer} className="mt-3 text-xs text-primary underline" onClick={() => void payments.signIn()}>Sign in and retry</button></div>}
-    {payments.cancellation && <div role="status" className="mx-7 mt-5 rounded-lg bg-[#f8f6fc] p-4 text-xs text-[#73677f]">{payments.cancellation.message} {payments.cancellation.hash && <a className="text-primary underline" target="_blank" rel="noreferrer" href={`https://explorer.testnet.arc.io/tx/${payments.cancellation.hash}`}>View transaction</a>}</div>}
+    {payments.cancellation && <div role="status" className="mx-7 mt-5 rounded-lg bg-[#f8f6fc] p-4 text-xs text-[#73677f]">{payments.cancellation.message} {payments.cancellation.hash && <a className="text-primary underline" target="_blank" rel="noreferrer" href={`${arcChain.blockExplorers.default.url}/tx/${payments.cancellation.hash}`}>View transaction</a>}</div>}
     {payments.schedules.map((schedule) => <article key={schedule.scheduleId} className="border-b border-border p-7 last:border-b-0">
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">{schedule.label || "Recurring payment"}</h3><span className="rounded bg-[#f6f2fc] px-2 py-1 text-xs text-[#73677f]">{schedule.cancelled ? "Cancelled" : `${schedule.payments.length} signed payments`}</span></div>
       <p className="mt-2 break-all text-xs text-[#73677f]">To {schedule.payments[0]?.payee}</p>
@@ -32,7 +33,7 @@ export default function PaymentDashboard({ payments }: { payments: ReturnType<ty
         {schedule.payments.map((payment) => <li key={payment.occurrence} className="flex flex-wrap justify-between gap-2 rounded-lg bg-[#f8f6fc] p-3">
           <span>{new Date((Number(payment.validAfter) + 1) * 1000).toLocaleString()}<br /><span className="text-[11px]">Expires {new Date(Number(payment.validBefore) * 1000).toLocaleString()}</span></span>
           <span>{formatUSDC(BigInt(payment.amount))} USDC + {formatUSDC(BigInt(payment.tip))} tip<br /><span>{payment.status}</span></span>
-          {payment.transactionHash && <a className="text-primary underline" href={`https://explorer.testnet.arc.io/tx/${payment.transactionHash}`} target="_blank" rel="noreferrer">View transaction</a>}
+          {payment.transactionHash && <a className="text-primary underline" href={`${arcChain.blockExplorers.default.url}/tx/${payment.transactionHash}`} target="_blank" rel="noreferrer">View transaction</a>}
         </li>)}
       </ol></details>
     </article>)}

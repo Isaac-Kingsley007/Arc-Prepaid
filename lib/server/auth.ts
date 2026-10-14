@@ -1,4 +1,5 @@
 import "server-only";
+import { arcChain } from "../network";
 import { createHash, randomBytes } from "node:crypto";
 import { recoverMessageAddress, type Address, type Hex } from "viem";
 import { createSiweMessage } from "viem/siwe";
@@ -7,14 +8,14 @@ import { getDatabase, type Database } from "../db/client";
 import { normalizeAddress } from "../db/authorization";
 import { ApiError } from "./http";
 
-export const SESSION_COOKIE = "prepaid-session";
+export const SESSION_COOKIE = `prepaid-session-${arcChain.id}`;
 function digest(token: string) { return createHash("sha256").update(token).digest("hex"); }
 export function createSessionRepository(db: Database = getDatabase()) {
   return {
     async challenge(payer: Address, origin: string) {
       const token = randomBytes(32).toString("hex"), nonce = randomBytes(16).toString("hex");
       const expires = new Date(Date.now() + 300_000);
-      const message = createSiweMessage({ address: normalizeAddress(payer), chainId: 5042002,
+      const message = createSiweMessage({ address: normalizeAddress(payer), chainId: arcChain.id,
         domain: new URL(origin).host, uri: origin, version: "1", nonce, expirationTime: expires,
         statement: "Sign in to PrePaid to view and save your schedules. This does not authorize a payment." });
       await db`DELETE FROM prepaid_wallet_sessions WHERE expires_at <= now()`;

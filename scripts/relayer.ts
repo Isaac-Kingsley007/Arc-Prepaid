@@ -1,4 +1,5 @@
-import { createWalletClient, defineChain, encodeFunctionData, http, type Hex } from "viem";
+import { createWalletClient, encodeFunctionData, http, type Hex } from "viem";
+import { arcChain } from "../lib/network";
 import { privateKeyToAccount } from "viem/accounts";
 import { closeDatabase, getDatabase } from "../lib/db/client";
 import { createPaymentRepository } from "../lib/db/payments";
@@ -38,10 +39,9 @@ async function main() {
     console.log(`Verified replacement ${replacement}: ${result.executed} executed, ${result.failed} failed. Original journal entry resolved.`);
     return;
   }
-  const chain = defineChain({ id: context.chainId, name: "Arc Testnet", nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-    rpcUrls: { default: { http: [process.env.ARC_RPC_URL || "https://rpc.testnet.arc.io"] } } });
+  const chain = { ...arcChain, rpcUrls: { default: { http: [process.env.ARC_RPC_URL || arcChain.rpcUrls.default.http[0]] } } };
   const wallet = createWalletClient({ account, chain, transport: http(chain.rpcUrls.default.http[0], { retryCount: 1, timeout: 15_000 }) });
-  console.log(`${dryRun ? "Dry run" : "Execution"}: Arc testnet, relayer ${executor}, contract ${context.prepaid}.`);
+  console.log(`${dryRun ? "Dry run" : "Execution"}: ${arcChain.name}, relayer ${executor}, contract ${context.prepaid}.`);
   stage = dryRun ? "due-payment discovery and chain checks" : "batch execution and receipt recovery";
   await runCron({ context, executor, client, repo: createPaymentRepository(db), journal: createTransactionJournal(db), config, dryRun,
     sign: async (batch) => {

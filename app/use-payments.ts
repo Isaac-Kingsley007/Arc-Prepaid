@@ -1,4 +1,5 @@
 "use client";
+import { arcChain } from "@/lib/network";
 import { useRef, useState } from "react";
 import { useAccount, useConfig, useSignMessage, useSignTypedData } from "wagmi";
 import { getAccount, getWalletClient, waitForTransactionReceipt, writeContract } from "wagmi/actions";
@@ -41,7 +42,7 @@ export function usePayments() {
     const wallet = await getWalletClient(config);
     const [accounts, currentChain] = await Promise.all([wallet.getAddresses(), wallet.getChainId()]);
     if (accounts[0]?.toLowerCase() !== snapshot.toLowerCase()) throw new Error("Wallet account changed.");
-    if (currentChain !== 5042002) throw new Error("Switch your wallet to Arc Testnet first.");
+    if (currentChain !== arcChain.id) throw new Error(`Switch your wallet to ${arcChain.name} first.`);
   }
   async function authenticate(snapshot: string) {
     await ensureWallet(snapshot);
@@ -59,7 +60,7 @@ export function usePayments() {
   async function run(action: (snapshot: `0x${string}`) => Promise<void>) {
     if (lock.current) return false;
     if (!address) { setError("Connect your wallet first."); return false; }
-    if (chainId !== 5042002) { setError("Switch your wallet to Arc Testnet first."); return false; }
+    if (chainId !== arcChain.id) { setError(`Switch your wallet to ${arcChain.name} first.`); return false; }
     lock.current = true; setBusy(true); setError("");
     try { await action(address); return true; }
     catch (cause) {
@@ -98,14 +99,14 @@ export function usePayments() {
         }
         await ensureWallet(snapshot);
         setProgress("Confirm cancellation in your wallet. This transaction uses USDC for gas...");
-        hash = await writeContract(config, { chainId: 5042002, account: snapshot, address: context.prepaid,
+        hash = await writeContract(config, { chainId: arcChain.id, account: snapshot, address: context.prepaid,
           abi: prepaidAbi, functionName: "cancelSchedule", args: [scheduleId] });
         remember(hash);
         setCancellation({ payer: snapshot.toLowerCase(), hash, message: "Cancellation submitted. If confirmation or syncing fails, retry with this transaction." });
       }
       setProgress("Waiting for cancellation confirmation...");
       let replaced = false;
-      const receipt = await waitForTransactionReceipt(config, { chainId: 5042002, hash, confirmations: 1, timeout: 120_000,
+      const receipt = await waitForTransactionReceipt(config, { chainId: arcChain.id, hash, confirmations: 1, timeout: 120_000,
         onReplaced: ({ reason, transactionReceipt }) => {
           hash = transactionReceipt.transactionHash;
           replaced = reason !== "repriced";
