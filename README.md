@@ -1,3 +1,6 @@
+Mainnet rollout: see [MAINNET.md](MAINNET.md) for deployment, Neon, Vercel and relayer setup.
+The app defaults to mainnet; set `NEXT_PUBLIC_ARC_NETWORK=testnet` to retain testnet.
+
 PrePaid lets users plan recurring USDC payments on Arc. The frontend uses
 Next.js, and the smart contract uses signed USDC transfer authorizations.
 
@@ -12,7 +15,7 @@ date/time, and daily, weekly, or monthly intervals. End a schedule after
 dates and exact USDC totals. All dates use your device's local timezone;
 monthly payments keep the original day and adjust for shorter months.
 
-The wallet button connects through RainbowKit and wagmi on Arc testnet.
+The wallet button connects through RainbowKit and wagmi on the selected Arc network.
 It shows the connected address, opens account/disconnect controls, and offers
 network switching when the wallet is on another chain. Set your Reown project
 ID in `.env.local` as `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` (see
@@ -32,11 +35,11 @@ fails, keep the tab open and use **Retry saving**; the same schedule ID and
 signatures are reused. Unsaved signatures are held only in memory, so
 refreshing loses them. A declined signing request uploads no partial schedule.
 
-The app defaults to the current contract in `deployments/arc-testnet.json`.
+Mainnet requires `PREPAID_CONTRACT_ADDRESS`. Testnet can fall back to `deployments/arc-testnet.json`.
 `PREPAID_CONTRACT_ADDRESS` in `.env.local` overrides that address if needed.
 Before signing,
 the server checks the chain, nonce commitment, token, tip split, decimals and
-USDC domain against the configured deployment. Phase 1 supports Arc testnet.
+USDC domain against the configured deployment. Both Arc networks are supported.
 Set `APP_ORIGIN` to your app's exact origin (for example,
 `http://localhost:3000` locally or `https://your-app.example` when hosted).
 Production requires this setting. `ARC_RPC_URL` optionally overrides the
