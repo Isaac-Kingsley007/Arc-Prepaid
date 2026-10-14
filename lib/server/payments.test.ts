@@ -15,7 +15,7 @@ import { initialInput } from "../../app/schedule";
 
 const payer = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
 const other = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
-const context = { chainId: 5042002, prepaid: "0x1111111111111111111111111111111111111111", usdc: ARC_USDC } as const;
+const context = { chainId: 5042, prepaid: "0x1111111111111111111111111111111111111111", usdc: ARC_USDC } as const;
 describe("wallet authentication and app signing", () => {
   let pg: PGlite, server: PGLiteSocketServer, db: Database, auth: ReturnType<typeof createSessionRepository>;
   before(async () => {
@@ -50,8 +50,8 @@ describe("wallet authentication and app signing", () => {
   });
   it("builds strict, capped windows and verifies signed routing, totals, chain and payer", async () => {
     const domain = keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" }, { type: "address" }],
-      [keccak256(toHex("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")), keccak256(toHex("USDC")), keccak256(toHex("2")), BigInt(5042002), ARC_USDC]));
-    assert.equal(usdcDomainSeparator(5042002), domain);
+      [keccak256(toHex("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")), keccak256(toHex("USDC")), keccak256(toHex("2")), BigInt(context.chainId), ARC_USDC]));
+    assert.equal(usdcDomainSeparator(context.chainId), domain);
     const input = { ...initialInput, payee: other.address, label: "Rent", amount: "12.345678", tip: "0.1", startDate: "2090-01-01", cadence: "day" as const, count: "3" };
     const upload = preparePayments(input, context, normalizeAddress(payer.address));
     assert.equal(upload.payments.length, 3);
@@ -61,7 +61,7 @@ describe("wallet authentication and app signing", () => {
     for (let i = 0; i < upload.payments.length; i++) upload.payments[i] = attachSignature(upload.payments[i], await payer.signTypedData(authorizationMessage(upload, upload.payments[i])));
     assert.deepEqual(await validateUpload(upload, context, normalizeAddress(payer.address)), upload);
     await assert.rejects(validateUpload(upload, context, normalizeAddress(other.address)), /Invalid schedule/);
-    await assert.rejects(validateUpload({ ...upload, chainId: 5042 }, context, upload.payer), /Invalid schedule/);
+    await assert.rejects(validateUpload({ ...upload, chainId: 5042002 }, context, upload.payer), /Invalid schedule/);
     await assert.rejects(validateUpload({ ...upload, payments: upload.payments.map((p) => ({ ...p, amount: "1" })) }, context, upload.payer), /Invalid schedule/);
     await assert.rejects(verifyPaymentSignature(upload, { ...upload.payments[0], tip: "2" }));
     assert.equal(authorizationMessage(upload, upload.payments[0]).message.value, BigInt(12445678));
