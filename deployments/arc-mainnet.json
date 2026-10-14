@@ -1,0 +1,16 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "status": "deployed",
+  "deployer": "0xD8d1CFDf40405Ac9d36ef846f0918B631b546a95",
+  "usdc": "0x3600000000000000000000000000000000000000",
+  "transactionHash": "0x351425f67d8ce2c2af78d7d718669b6a08a0e91b47f6bdc47841f4f475fc4ccc",
+  "compilerVersion": "0.8.30+commit.73712a01",
+  "contract": "project/contracts/PrePaid.sol:PrePaid",
+  "constructorArguments": "0x0000000000000000000000003600000000000000000000000000000000000000",
+  "contractAddress": "0xacc4afcb52aa8a27a9be3a0a8da58580243889eb",
+  "blockNumber": "25884090",
+  "gasUsed": "1213413",
+  "actualGasCostUSDC": "0.02426826",
+  "explorerUrl": "https://explorer.arc.io/address/0xacc4afcb52aa8a27a9be3a0a8da58580243889eb"
+}
